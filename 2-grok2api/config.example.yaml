@@ -1,0 +1,67 @@
+# Grok2API Configuration Example
+# Copy this file to config.yaml and update the secrets before starting.
+
+server:
+  listen: "0.0.0.0:8000"
+  maxBodyBytes: 33554432 # 32MB
+  readTimeout: 15m
+  requestTimeout: 2h
+  swaggerEnabled: false
+
+secrets:
+  # Generate with: openssl rand -hex 32
+  jwtSecret: "YOUR_64_CHAR_HEX_JWT_SECRET_KEY_REPLACE_ME_NOW"
+  # Generate with: openssl rand -base64 32
+  credentialEncryptionKey: "YOUR_32_BYTE_BASE64_CREDENTIAL_ENCRYPTION_KEY="
+
+bootstrapAdmin:
+  username: "admin"
+  password: "CHANGE_THIS_SECURE_ADMIN_PASSWORD"
+
+frontend:
+  publicApiBaseURL: "http://localhost:3001"
+  staticPath: "./frontend/dist"
+
+database:
+  driver: sqlite
+  sqlite:
+    path: "./data/backend.db"
+
+runtimeStore:
+  driver: memory
+
+auth:
+  accessTokenTTL: 15m
+  refreshTokenTTL: 720h
+  secureCookies: false # Set to true if running behind HTTPS
+
+provider:
+  web:
+    allowNSFW: true
+  console:
+    baseURL: "https://console.x.ai"
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+    chatTimeout: 5m
+
+media:
+  driver: local
+  local:
+    path: "./data/media"
+
+qualityGuard:
+  enabled: true
+  model: "grok-4.6"
+  mode: passive
+  activeInterval: 30m
+  passivePollInterval: 5s
+  softTPS: 500
+  hardTPS: 1000
+  consecutiveSoft: 2
+  consecutiveErrors: 2
+  quarantineDuration: 5m
+  noAccountBackoff: 5m
+  minimumHealthyNodes: 3
+  maxOutputTokens: 384
+  failClosed: false
+  minimumGenerationWindow: 1s
+  nodeIDs: []

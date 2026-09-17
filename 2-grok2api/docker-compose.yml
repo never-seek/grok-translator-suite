@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  grok2api:
+    image: ghcr.io/chenyme/grok2api:latest
+    container_name: grok2api-standalone
+    restart: unless-stopped
+    ports:
+      - "${GROK2API_PORT:-3001}:8000"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3

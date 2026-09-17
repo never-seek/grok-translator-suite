@@ -1,0 +1,20 @@
+{
+  "profiles": {
+    "quality": {
+      "task": "body",
+      "primary_model": "grok-4.20-0309-reasoning",
+      "fallback_model": "grok-4.20-0309-non-reasoning",
+      "prompt_profile": "neutral_v1",
+      "auto_repair_enabled": true,
+      "validator": {
+        "mode": "practical_validator_three_tier",
+        "hangul_residual_mode": "WARN",
+        "english_contamination_mode": "WARN",
+        "source_jamo_mode": "PRESERVE",
+        "raw_repetition_exact_mode": "HARD_FAIL",
+        "raw_repetition_similar_mode": "HARD_FAIL",
+        "opaque_literal_exception_enabled": true
+      }
+    }
+  }
+}

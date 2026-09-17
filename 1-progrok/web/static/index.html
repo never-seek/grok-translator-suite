@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>ProGrok 协议注册</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css?v=20260717-8">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">STANDALONE REGISTRATION</p>
+        <div class="title-line">
+          <h1>ProGrok 协议注册</h1>
+        </div>
+        <p class="subtitle">独立运行 · 本地保存 · 无需 PostgreSQL</p>
+      </div>
+      <div class="header-actions">
+        <div class="path-control">
+          <button type="button" id="paths-button" class="path-button">注册文件路径</button>
+          <div id="paths-popover" class="paths-popover" hidden>
+            <div class="paths-head"><strong>注册文件保存位置</strong><button type="button" id="paths-close" class="paths-close" aria-label="关闭">×</button></div>
+            <div id="paths-list" class="paths-list"><div class="paths-loading">正在读取路径…</div></div>
+          </div>
+        </div>
+        <div class="download-control">
+          <button type="button" id="download-button" class="path-button">账号下载</button>
+          <div id="download-popover" class="paths-popover download-popover" hidden>
+            <div class="paths-head"><strong>账号下载</strong><button type="button" id="download-close" class="paths-close" aria-label="关闭">×</button></div>
+            <div class="download-bar">
+              <label>下载格式<select id="download-format"><option value="pure_sso">纯 SSO</option><option value="cookie">sso=...</option><option value="email_sso">邮箱 + SSO</option><option value="email_password_sso">邮箱:密码:SSO</option><option value="json">普通 JSON（邮箱 + 密码）</option><option value="cpa_json" selected>CPA JSON</option><option value="sub2api_json">Sub2API JSON</option></select></label>
+              <label>下载范围<select id="download-batch"><option value="">全部成功账号</option></select></label>
+              <button type="button" id="download-accounts" class="download-button">下载账号</button>
+            </div>
+          </div>
+        </div>
+        <div id="health" class="badge">检查服务…</div>
+      </div>
+    </header>
+
+    <div class="workspace">
+    <section class="panel config-panel">
+      <div class="config-toolbar">
+        <div class="config-toolbar-title">注册配置</div>
+        <div class="actions">
+          <label class="toolbar-format">默认注册 JSON<select name="registration_json_format" form="config-form"><option value="cpa">CPA JSON</option><option value="sub2api">Sub2API JSON</option></select></label>
+          <input id="manual-import-file" type="file" accept=".json,application/json" multiple hidden>
+          <button type="button" id="manual-import-button" class="secondary">手动导入 JSON</button>
+          <button type="button" id="sync-import-button" class="secondary" title="自动将本地未导入到反代的注册账号批量补录导入">一键补录导入</button>
+          <button type="button" id="save" class="secondary">保存配置</button>
+          <button type="button" id="pause-current" class="pause-current" disabled>暂停注册</button>
+          <button type="submit" id="start" form="config-form">开始注册</button>
+        </div>
+      </div>
+      <div class="config-scroll">
+      <form id="config-form">
+        <div class="primary-setting">
+          <label>注册数量<input name="count" type="number" min="1" max="10000"></label>
+          <label>并发数<input name="concurrency" type="number" min="1" max="10"></label>
+          <label>错峰毫秒<input name="stagger_ms" type="number" min="0" max="60000"></label>
+          <label class="tune-toggle"><span>自动调优错峰</span><input name="auto_tune_enabled" type="checkbox"></label>
+          <div id="performance-profile" class="performance-profile wide">正在评估本机性能…</div>
+        </div>
+        <div class="section-title"><span>01</span> 邮箱服务</div>
+        <div class="grid">
+            <label>邮箱类型<select name="mail_provider"><option value="yyds">YYDS Mail</option><option value="custom">自定义（Cloudflare 邮箱）</option></select></label>
+            <label>API 地址<input name="mail_base_url" placeholder="YYDS 或自建邮箱 API 地址"></label>
+            <label>API Key / 管理员密钥<input name="mail_api_key" type="password" autocomplete="off"></label>
+          <label>邮箱域名<input name="mail_domain" placeholder="可留空自动选择"></label>
+          <label>邮箱前缀<input value="自动随机（每个账号不同）" disabled></label>
+        </div>
+
+        <div class="section-title"><span>02</span> 过盾方式</div>
+        <div class="grid">
+          <label>Captcha<select name="captcha_provider"><option value="local">本地 Turnstile Solver</option><option value="yescaptcha">YesCaptcha</option></select></label>
+          <label>Solver Mode<select name="solver_mode"><option value="local">local only</option><option value="yescaptcha">YesCaptcha only</option><option value="auto_local_first">auto: local first</option><option value="auto_yescaptcha_first">auto: YesCaptcha first</option></select></label>
+          <label>Solver Wait Sec<input name="solver_wait_sec" type="number" min="5" max="300" placeholder="120"></label>
+          <label>Solver Fallback<select name="solver_fallback_enabled"><option value="true">enabled</option><option value="false">disabled</option></select></label>
+          <label><span class="field-label">本地 Solver <span id="solver-state" class="detect-state">检测中…</span></span><div class="input-action"><input name="local_solver_url" placeholder="正在自动检测" readonly><button type="button" id="detect-solver" class="inline-button">重新检测</button></div></label>
+          <label>YesCaptcha Key<input name="yescaptcha_key" type="password" autocomplete="off"></label>
+        </div>
+
+        <div class="section-title"><span>03</span> 代理与批量</div>
+        <div class="grid">
+          <label class="wide"><span class="field-label proxy-field-label">本地全局代理<button type="button" id="detect-proxy" class="inline-button">检测本机代理</button></span><input name="local_proxy" placeholder="例如 http://127.0.0.1:7897；中国服务器先走这里"></label>
+          <label>链式代理端口<input name="proxy_chain_port" type="number" min="1024" max="65535" placeholder="17997"></label>
+          <label class="wide"><span class="field-label proxy-field-label">出口代理池</span><textarea name="proxy" rows="4" placeholder="每行一个出口代理。填写本地全局代理后，程序会自动使用：本机 -> 本地全局代理 -> 出口代理 -> x.ai"></textarea></label>
+          <label>代理用户名<input name="proxy_username"></label>
+          <label>代理密码<input name="proxy_password" type="password" autocomplete="off"></label>
+          <label>轮换策略<select name="proxy_strategy"><option value="round_robin">轮询</option><option value="random">随机</option><option value="sticky">固定</option></select></label>
+          <label>Max Proxy Failures<input name="proxy_max_failures" type="number" min="1" max="20" placeholder="3"></label>
+          <label>Proxy Cooldown Sec<input name="proxy_cooldown_sec" type="number" min="0" max="86400" placeholder="900"></label>
+          <label class="wide">Proxy State File<input name="proxy_state_file" placeholder="config/proxy_health_state.json"></label>
+        </div>
+
+        <div class="section-title"><span>04</span> 测活与自动导入</div>
+        <div class="grid">
+          <label>测活模型<input name="probe_model" placeholder="grok-4.5"></label>
+          <label>测活并发数<input name="probe_concurrency" type="number" min="1" max="10"></label>
+          <label>测活错峰毫秒<input name="probe_stagger_ms" type="number" min="0" max="60000"></label>
+          <label>导入并发数<input name="import_concurrency" type="number" min="1" max="10"></label>
+          <label>导入错峰毫秒<input name="import_stagger_ms" type="number" min="0" max="60000"></label>
+          <label>自动导入<select name="auto_import_enabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
+          <label>导入对象<select name="auto_import_target"><option value="grokcli2api,grok2api">grokcli-2api + grok2api</option><option value="grokcli2api">grokcli-2api</option><option value="grok2api">grok2api</option><option value="sub2api">Sub2API</option><option value="cpa">CPA</option></select></label>
+          <label data-import-target="sub2api">Sub2API 地址<input name="sub2api_base_url" placeholder="https://sub2.example.com"></label>
+          <label data-import-target="sub2api">Sub2API 认证方式<select name="sub2api_auth_mode"><option value="password">管理员邮箱 + 密码</option><option value="api_key">管理员 API Key</option></select></label>
+          <label data-import-target="sub2api" data-sub2-auth="password">Sub2API 管理员邮箱<input name="sub2api_admin_email" type="email" autocomplete="off"></label>
+          <label data-import-target="sub2api" data-sub2-auth="password">Sub2API 管理员密码<input name="sub2api_admin_password" type="password" autocomplete="off"></label>
+          <label data-import-target="sub2api" data-sub2-auth="api_key" hidden>Sub2API 管理员 API Key<input name="sub2api_api_key" type="password" autocomplete="off"></label>
+          <label data-import-target="cpa" hidden>CPA 地址<input name="cpa_base_url" placeholder="https://cpa.example.com"></label>
+          <label data-import-target="grokcli2api">grokcli-2api URL<input name="grokcli2api_base_url" placeholder="http://127.0.0.1:3000"></label>
+          <label data-import-target="grokcli2api">grokcli-2api Admin Password<input name="grokcli2api_admin_password" type="password" autocomplete="off"></label>
+          <label data-import-target="grokcli2api">grokcli-2api Admin Token optional<input name="grokcli2api_admin_token" type="password" autocomplete="off"></label>
+          <label data-import-target="grok2api">grok2api URL<input name="grok2api_base_url" placeholder="http://127.0.0.1:3001"></label>
+          <label data-import-target="grok2api">grok2api Admin Username<input name="grok2api_admin_username" placeholder="admin"></label>
+          <label data-import-target="grok2api">grok2api Admin Password<input name="grok2api_admin_password" type="password" autocomplete="off"></label>
+          <label data-import-target="grok2api">grok2api Admin Token optional<input name="grok2api_admin_token" type="password" autocomplete="off"></label>
+          <label data-import-target="grok2api">grok2api Providers<input name="grok2api_providers" placeholder="build,web,console"></label>
+          <label data-import-target="cpa" hidden>CPA 管理密钥<input name="cpa_management_key" type="password" autocomplete="off"></label>
+        </div>
+      </form>
+      </div>
+    </section>
+
+    <div class="side-column">
+    <section class="panel results log-panel">
+      <div class="results-head">
+        <div><div class="section-title"><span>05</span> 实时信息流</div><p id="summary">暂无任务</p></div>
+        <div class="results-actions"><button id="quick-sync-import" class="ghost" title="扫描并补录未导入账号">补录导入</button><button id="reset-round" class="ghost reset-round">清除本轮</button><button id="refresh" class="ghost">立即刷新</button></div>
+      </div>
+      <div class="monitor-stats">
+        <div class="monitor-stat success"><span>注册成功</span><strong id="stat-register-ok">0</strong></div>
+        <div class="monitor-stat danger"><span>注册失败</span><strong id="stat-register-fail">0</strong></div>
+        <div class="monitor-stat"><span>注册成功率</span><strong id="stat-register-rate">--</strong></div>
+        <div class="monitor-stat success"><span>已导入</span><strong id="stat-import-ok">0</strong></div>
+        <div class="monitor-stat danger"><span>导入失败</span><strong id="stat-import-fail">0</strong></div>
+        <div class="monitor-stat"><span>导入成功率</span><strong id="stat-import-rate">--</strong></div>
+        <div class="monitor-stat success"><span>测活成功</span><strong id="stat-probe-ok">0</strong></div>
+        <div class="monitor-stat danger"><span>测活失败</span><strong id="stat-probe-fail">0</strong></div>
+        <div class="monitor-stat"><span>测活成功率</span><strong id="stat-probe-rate">--</strong></div>
+      </div>
+      <div id="sync-import-banner" class="sync-import-banner" hidden>
+        <div class="sync-banner-head">
+          <span class="sync-banner-title">⚡ 账号补录导入中</span>
+          <span id="sync-banner-progress" class="sync-banner-pct">0%</span>
+        </div>
+        <div class="sync-progress-bar"><div id="sync-progress-fill" class="sync-progress-fill" style="width: 0%"></div></div>
+        <div class="sync-banner-info">
+          <span id="sync-banner-message">正在准备...</span>
+          <span id="sync-banner-counts">0 / 0</span>
+        </div>
+      </div>
+      <div id="batches-panel" class="batches-panel" hidden>
+        <div class="batches-head">
+          <div class="batches-title">运行批次监控 <span id="active-batches-count" class="batches-badge">0</span></div>
+          <div class="batches-tabs" id="batches-filter-tabs">
+            <button type="button" class="batch-tab-btn active" data-filter="all">全部批次</button>
+          </div>
+        </div>
+        <div id="batch-cards" class="batch-cards"></div>
+      </div>
+      <div class="activity-label"><span>步骤动态</span><small id="activity-count">0 条</small></div>
+      <div id="tasks" class="tasks activity-feed"><div class="empty">启动任务后会在这里逐步显示注册动态</div></div>
+    </section>
+    </div>
+    </div>
+  </main>
+  <div id="concurrency-warning" class="safety-modal" role="dialog" aria-modal="true" aria-labelledby="concurrency-warning-title" hidden>
+    <div class="safety-dialog">
+      <div class="safety-icon">!</div>
+      <h2 id="concurrency-warning-title">高并发安全提醒</h2>
+      <p>当前注册并发为 <strong id="concurrency-warning-value">--</strong>。并发超过 3 可能增加过盾失败、链路阻塞和账号风控概率，请确认本机 Solver 与代理资源能够承受。</p>
+      <div class="safety-performance">
+        <span>当前电脑性能评估</span>
+        <strong id="concurrency-performance-summary">正在读取性能信息…</strong>
+        <small id="concurrency-performance-advice"></small>
+      </div>
+      <div class="safety-actions">
+        <button type="button" id="concurrency-warning-cancel" class="secondary">返回调整</button>
+        <button type="button" id="concurrency-warning-continue" class="secondary">仅本次继续</button>
+        <button type="button" id="concurrency-warning-remember">继续并记住，下次不再提醒</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=20260820-proxy-solver-1"></script>
+</body>
+</html>

@@ -1,0 +1,3 @@
+# Pure Python Standard Library (No external runtime dependencies required)
+# For development & running tests:
+pytest>=7.4.0

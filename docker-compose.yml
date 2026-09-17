@@ -1,0 +1,79 @@
+services:
+  # -------------------------------------------------------------------------
+  # Module 2: Grok2API (High-concurrency multi-account gateway)
+  # -------------------------------------------------------------------------
+  grok2api:
+    image: ghcr.io/chenyme/grok2api:latest
+    container_name: grok2api-gateway
+    restart: unless-stopped
+    ports:
+      - "${GROK2API_PORT:-3001}:8000"
+    environment:
+      TZ: Asia/Shanghai
+      GROK2API_DATABASE_URL: ""
+    volumes:
+      - ./2-grok2api/config.yaml:/run/grok2api/config.yaml:ro
+      - grok2api_data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - grok_translator_net
+
+  # -------------------------------------------------------------------------
+  # Module 3: Translation Validator Proxy (Practical 3-Tier Quality Guard)
+  # -------------------------------------------------------------------------
+  translation-validator:
+    build:
+      context: ./3-translation-validator
+      dockerfile: Dockerfile
+    container_name: grok-translation-validator
+    restart: unless-stopped
+    ports:
+      - "${TRANSLATION_VALIDATOR_PORT:-3002}:3002"
+    environment:
+      PORT: 3002
+      UPSTREAM_URL: http://grok2api:8000
+      PRIMARY_MODEL: ${VALIDATOR_PRIMARY_MODEL:-grok-4.20-0309-reasoning}
+      FALLBACK_MODEL: ${VALIDATOR_FALLBACK_MODEL:-grok-4.20-0309-non-reasoning}
+      PROMPT_PROFILE: ${VALIDATOR_PROMPT_PROFILE:-neutral_v1}
+    depends_on:
+      grok2api:
+        condition: service_healthy
+    networks:
+      - grok_translator_net
+
+  # -------------------------------------------------------------------------
+  # Module 1: ProGrok (Automated Protocol Registrar & Turnstile Solver)
+  # -------------------------------------------------------------------------
+  progrok:
+    build:
+      context: ./1-progrok
+      dockerfile: Dockerfile
+    container_name: progrok-registrar
+    restart: unless-stopped
+    ports:
+      - "${PROGROK_WEB_PORT:-3080}:3080"
+      - "${PROGROK_SOLVER_PORT:-5072}:5072"
+    environment:
+      GROK2API_BASE_URL: http://grok2api:8000
+      TURNSTILE_PORT: 5072
+      WEB_PORT: 3080
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+    volumes:
+      - progrok_data:/app/runtime
+    networks:
+      - grok_translator_net
+
+networks:
+  grok_translator_net:
+    driver: bridge
+
+volumes:
+  grok2api_data:
+  progrok_data:
