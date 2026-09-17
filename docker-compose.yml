@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # -------------------------------------------------------------------------
   # Module 2: Grok2API (High-concurrency multi-account gateway)
@@ -10,16 +12,15 @@ services:
       - "${GROK2API_PORT:-3001}:8000"
     environment:
       TZ: Asia/Shanghai
-      GROK2API_DATABASE_URL: ""
     volumes:
-      - ./2-grok2api/config.yaml:/run/grok2api/config.yaml:ro
-      - grok2api_data:/app/data
+      - ./2-grok2api/config.yaml:/app/config.yaml:ro
+      - ./2-grok2api/data:/app/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz >/dev/null 2>&1 || exit 0"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 15s
     networks:
       - grok_translator_net
 
@@ -36,13 +37,16 @@ services:
       - "${TRANSLATION_VALIDATOR_PORT:-3002}:3002"
     environment:
       PORT: 3002
+      UPSTREAM_HOST: grok2api
+      UPSTREAM_PORT: 8000
       UPSTREAM_URL: http://grok2api:8000
-      PRIMARY_MODEL: ${VALIDATOR_PRIMARY_MODEL:-grok-4.20-0309-reasoning}
-      FALLBACK_MODEL: ${VALIDATOR_FALLBACK_MODEL:-grok-4.20-0309-non-reasoning}
-      PROMPT_PROFILE: ${VALIDATOR_PROMPT_PROFILE:-neutral_v1}
+      ENABLE_QUALITY_PROMPT_OVERRIDE: "true"
+      ENABLE_PHONETIC_TRANSLITERATION_MATCHER: "true"
+    volumes:
+      - ./3-translation-validator/config:/app/config
+      - ./3-translation-validator/logs:/app/logs
     depends_on:
-      grok2api:
-        condition: service_healthy
+      - grok2api
     networks:
       - grok_translator_net
 
@@ -57,23 +61,16 @@ services:
     restart: unless-stopped
     ports:
       - "${PROGROK_WEB_PORT:-3080}:3080"
-      - "${PROGROK_SOLVER_PORT:-5072}:5072"
     environment:
       GROK2API_BASE_URL: http://grok2api:8000
-      TURNSTILE_PORT: 5072
       WEB_PORT: 3080
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      ALL_PROXY: ${ALL_PROXY:-}
     volumes:
-      - progrok_data:/app/runtime
+      - ./1-progrok/config:/app/config
+    depends_on:
+      - grok2api
     networks:
       - grok_translator_net
 
 networks:
   grok_translator_net:
     driver: bridge
-
-volumes:
-  grok2api_data:
-  progrok_data:

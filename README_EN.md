@@ -94,7 +94,9 @@ flowchart TD
 
 ---
 
-## Quickstart
+## Quickstart (One-Click Linux / VPS Deployment)
+
+Tailored for users with their own Linux VPS (Ubuntu / Debian / CentOS / AlmaLinux), requiring only one command to deploy:
 
 ### 1. Clone Repository
 
@@ -103,26 +105,48 @@ git clone https://github.com/your-username/grok-translator-suite.git
 cd grok-translator-suite
 ```
 
-### 2. Configure Environment
+### 2. Execute One-Click Deployment
 
 ```bash
-# Copy environment file template
-cp .env.example .env
-
-# Customize passwords and secrets as needed
+chmod +x deploy.sh manage.sh
+./deploy.sh
 ```
 
-### 3. Launch via Docker Compose
+The script automatically handles:
+1. Environment verification (installs Docker and Compose if missing);
+2. Cryptographically secure random secret generation (JWT Secret, encryption key, admin password — 100% sanitized with unique keys per deployment);
+3. SQLite database schema initialization;
+4. Multi-container build and launch via Docker Compose;
+5. Summary output with public IP endpoints, credentials, and translation client setup instructions.
+
+---
+
+## Operations & Management (`./manage.sh`)
+
+Manage the running suite with the bundled management CLI:
 
 ```bash
-docker compose up -d
+# Check running status and health of all modules
+./manage.sh status
+
+# View live aggregate logs (or pass module name, e.g. ./manage.sh logs translation-validator)
+./manage.sh logs
+
+# Restart all services
+./manage.sh restart
+
+# Safely purge historical audits and reclaim disk space (foreign-key protected)
+./manage.sh cleanup
+
+# Pull latest images and reload
+./manage.sh update
 ```
 
 Once started, the services will be reachable at:
-- **Client API Endpoint**: `http://localhost:3002/v1` (Translation Validator Proxy)
-- **Audit Web Dashboard**: `http://localhost:3002/audit`
-- **Grok2API Admin Panel**: `http://localhost:3001`
-- **ProGrok Web Console**: `http://localhost:3080`
+- **Client API Endpoint**: `http://YOUR_SERVER_IP:3002/v1` (Translation Validator Proxy)
+- **Audit Web Dashboard**: `http://YOUR_SERVER_IP:3002/audit`
+- **Grok2API Admin Panel**: `http://YOUR_SERVER_IP:3001`
+- **ProGrok Web Console**: `http://YOUR_SERVER_IP:3080`
 
 ---
 

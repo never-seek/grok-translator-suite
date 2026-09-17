@@ -94,7 +94,9 @@ flowchart TD
 
 ---
 
-## 快速上手
+## 快速上手 (Linux / VPS 一键部署)
+
+适合拥有自己服务器（Ubuntu / Debian / CentOS / AlmaLinux 等）的用户，全程仅需执行一条命令：
 
 ### 1. 检出项目
 
@@ -103,26 +105,48 @@ git clone https://github.com/your-username/grok-translator-suite.git
 cd grok-translator-suite
 ```
 
-### 2. 配置环境变量
+### 2. 执行一键部署
 
 ```bash
-# 复制环境变量模板
-cp .env.example .env
-
-# 按需修改 .env 中的管理密码与密钥（默认开箱即用）
+chmod +x deploy.sh manage.sh
+./deploy.sh
 ```
 
-### 3. 一键 Docker Compose 启动
+脚本将自动执行以下全流程：
+1. 检测并自动就绪 Docker 及 Docker Compose 环境；
+2. 自动生成高强度独立随机密钥（JWT Secret、凭据加密 Key、随机管理员密码，做到**全脱敏且千人千密**）；
+3. 预载入纯净 SQLite 数据库表结构；
+4. 容器化一键构建并拉起全套三个模块服务；
+5. 在终端打印你的公网服务访问入口、管理凭据与翻译软件（NovelPie 等）的配置范例。
+
+---
+
+## 日常运维与监控 (`./manage.sh`)
+
+项目提供了极其简便的运维管理脚本：
 
 ```bash
-docker compose up -d
+# 查看全套服务运行状态与健康度
+./manage.sh status
+
+# 查看实时聚合日志（或指定服务名如 ./manage.sh logs translation-validator）
+./manage.sh logs
+
+# 重启全部服务
+./manage.sh restart
+
+# 安全清理历史审计与碎片，释放磁盘空间（内置外键保护，防 502）
+./manage.sh cleanup
+
+# 一键拉取更新并重新加载
+./manage.sh update
 ```
 
 启动完成后，系统各服务就绪：
-- **翻译客户端对接地址**：`http://localhost:3002/v1`（质检代理前端）
-- **质检监控看板**：`http://localhost:3002/audit`
-- **Grok2API 管理后台**：`http://localhost:3001`
-- **ProGrok 注册控制台**：`http://localhost:3080`
+- **翻译客户端对接地址**：`http://你的服务器IP:3002/v1`（质检代理前端）
+- **质检监控看板**：`http://你的服务器IP:3002/audit`
+- **Grok2API 管理后台**：`http://你的服务器IP:3001`
+- **ProGrok 注册控制台**：`http://你的服务器IP:3080`
 
 ---
 

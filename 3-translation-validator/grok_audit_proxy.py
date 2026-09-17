@@ -19,8 +19,16 @@ from typing import List, Tuple, Optional, Dict, Set
 
 LISTEN_HOST = os.getenv("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", os.getenv("PORT", "3002")))
-UPSTREAM_HOST = os.getenv("UPSTREAM_HOST", "127.0.0.1")
-UPSTREAM_PORT = int(os.getenv("UPSTREAM_PORT", "3001"))  # Upstream Grok2API port
+_raw_upstream_url = os.getenv("UPSTREAM_URL", "")
+if _raw_upstream_url:
+    if not _raw_upstream_url.startswith("http://") and not _raw_upstream_url.startswith("https://"):
+        _raw_upstream_url = "http://" + _raw_upstream_url
+    _parsed_u = urllib.parse.urlparse(_raw_upstream_url)
+    UPSTREAM_HOST = _parsed_u.hostname or "127.0.0.1"
+    UPSTREAM_PORT = _parsed_u.port or (443 if _parsed_u.scheme == "https" else 80)
+else:
+    UPSTREAM_HOST = os.getenv("UPSTREAM_HOST", "127.0.0.1")
+    UPSTREAM_PORT = int(os.getenv("UPSTREAM_PORT", "3001"))  # Upstream Grok2API port
 
 CONFIG_FILE = os.getenv("CONFIG_FILE", "./config/translation_profiles.json")
 DEFAULT_UPSTREAM_AUTH_TOKEN = os.getenv("UPSTREAM_AUTH_TOKEN", "")
