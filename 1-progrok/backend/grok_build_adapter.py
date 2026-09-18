@@ -124,6 +124,38 @@ LOCAL_SOLVER_POLL_SEC = float(
 _sessions: dict[str, dict[str, Any]] = {}
 _batches: dict[str, dict[str, Any]] = {}
 _lock = threading.RLock()
+_BATCHES_FILE = Path(
+    os.getenv("PROGROK_BATCHES_FILE")
+    or (RUNTIME_DATA_DIR / "batches.json")
+)
+
+
+def _persist_batches_to_disk() -> None:
+    try:
+        _BATCHES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _BATCHES_FILE.with_suffix(".tmp")
+        with _lock:
+            data = {k: v for k, v in _batches.items()}
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(_BATCHES_FILE)
+    except Exception:
+        pass
+
+
+def _load_batches_from_disk() -> None:
+    try:
+        if _BATCHES_FILE.is_file():
+            data = json.loads(_BATCHES_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                with _lock:
+                    for k, v in data.items():
+                        if isinstance(v, dict) and k not in _batches:
+                            _batches[k] = v
+    except Exception:
+        pass
+
+
+_load_batches_from_disk()
 # batch_id -> True while a local ThreadPool spawner is alive in THIS process.
 _active_batch_runners: dict[str, bool] = {}
 # Keep local captcha fan-out aligned with the Solver browser pool. A bounded
@@ -495,6 +527,7 @@ def _mirror_reg_sess(sid: str, sess: dict[str, Any] | None) -> None:
 
 
 def _mirror_reg_batch(batch_id: str, batch: dict[str, Any] | None) -> None:
+    _persist_batches_to_disk()
     if not _reg_redis() or not batch_id or batch is None:
         return
     try:
@@ -596,6 +629,11 @@ def _load_reg_sess(sid: str) -> dict[str, Any] | None:
 
 
 def _load_reg_batch(batch_id: str) -> dict[str, Any] | None:
+    with _lock:
+        local = _batches.get(batch_id)
+        if local is not None:
+            return local
+    _load_batches_from_disk()
     with _lock:
         local = _batches.get(batch_id)
         if local is not None:
@@ -4961,6 +4999,8 @@ def stop_all_active_registrations() -> dict[str, Any]:
 
 def list_registration_sessions() -> dict[str, Any]:
     _clean_old_sessions()
+    if not _batches:
+        _load_batches_from_disk()
     try:
         reclaim_orphaned_registration_sessions(stale_sec=180.0)
     except Exception:
@@ -5144,6 +5184,28 @@ def _batch_stats(
             target = 0
     if target <= 0:
         target = total
+
+    if isinstance(batch, dict):
+        try:
+            b_ok = int(batch.get("ok_count") or 0)
+            if b_ok > imported:
+                imported = b_ok
+        except Exception:
+            pass
+        try:
+            b_fail = int(batch.get("fail_count") or 0)
+            if b_fail > error:
+                error = b_fail
+        except Exception:
+            pass
+        try:
+            b_fin = int(batch.get("finished") or 0)
+            if b_fin > done:
+                done = b_fin
+        except Exception:
+            pass
+    done = max(done, imported + error + cancelled)
+    observed = max(observed, done + running)
 
     status = "running"
     if observed == 0:

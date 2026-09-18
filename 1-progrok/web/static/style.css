@@ -64,3 +64,80 @@ main{width:min(1560px,calc(100% - 32px))}.workspace{display:grid;grid-template-c
 .sync-progress-fill{height:100%;background:var(--accent);transition:width .3s ease}
 .sync-banner-info{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:#8bb7a2}
 
+
+/* Compact Horizontal Summary & Layout Optimization */
+.results-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.results-head .section-title {
+  margin: 0;
+  white-space: nowrap;
+}
+.results-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  margin-top: 7px;
+  margin-bottom: 2px;
+  background: #0b1014;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  line-height: 1.4;
+}
+.results-summary-row span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.results-summary-row strong {
+  color: var(--text);
+  font-family: ui-monospace, Consolas, monospace;
+}
+.monitor-stats {
+  gap: 5px !important;
+  margin-top: 7px !important;
+}
+.monitor-stat {
+  padding: 6px 9px !important;
+  border-radius: 8px !important;
+}
+.monitor-stat strong {
+  font-size: 16px !important;
+  margin-top: 1px !important;
+}
+.batches-panel {
+  margin-top: 7px !important;
+  padding: 8px 10px !important;
+  max-height: 180px !important;
+}
+.batches-head {
+  margin-bottom: 6px !important;
+}
+.activity-label {
+  margin-top: 7px !important;
+  padding-top: 7px !important;
+  font-size: 11px !important;
+}
+.side-column, .side-column .log-panel, .config-panel {
+  height: calc(100vh - 90px) !important;
+  min-height: 720px !important;
+  max-height: 980px !important;
+}
+.log-panel .tasks {
+  flex: 1 1 220px !important;
+  min-height: 180px !important;
+  overflow-y: auto !important;
+  margin-top: 6px !important;
+}
+
+

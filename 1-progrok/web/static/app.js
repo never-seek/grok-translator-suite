@@ -44,7 +44,7 @@ function translateMessage(value){const text=String(value||'');let m;if((m=text.m
 const registrationFailureStatuses=new Set(['error','failed','protocol_error','protocol_blocked']);
 function registrationSucceeded(session){return (session.imported_account_ids||[]).length>0||Number(session.auth_json_count||0)>0}
 function registrationFailed(session){return registrationFailureStatuses.has(String(session.status||'').toLowerCase())&&!registrationSucceeded(session)}
-function registrationTiming(batches,sessions,successCount){if(!successCount)return'总耗时 -- / 平均 --';const records=batches.length?batches:sessions;const starts=records.map(item=>Number(item.created_at||0)).filter(value=>value>0);if(!starts.length)return'总耗时 -- / 平均 --';const active=batches.some(batch=>!terminal(batch.status)&&!['paused','cancelled','stopped'].includes(String(batch.status||'').toLowerCase()));const ends=records.map(item=>Number(item.updated_at||item.created_at||0)).filter(value=>value>0);const total=Math.max(0,(active?Date.now()/1000:Math.max(...ends))-Math.min(...starts));return `总耗时 ${formatDuration(total)} / 平均 ${(total/successCount).toFixed(1)}秒`}
+function registrationTiming(batches,sessions,successCount){if(!successCount)return'总耗时 -- / 平均 --';const records=batches.length?batches:sessions;const starts=records.map(item=>Number(item.created_at||0)).filter(value=>value>0);if(!starts.length)return'总耗时 -- / 平均 --';const active=batches.some(batch=>!terminal(batch.status)&&!['paused','cancelled','stopped'].includes(String(batch.status||'').toLowerCase()));const ends=records.map(item=>Number(item.updated_at||item.created_at||0)).filter(value=>value>0);const total=Math.max(0,(active?Date.now()/1000:Math.max(...ends))-Math.min(...starts));return `耗时 <strong>${formatDuration(total)}</strong> · 均速 <strong>${(total/successCount).toFixed(1)}s</strong>`}
 function metricRate(ok,fail){const total=ok+fail;return total?`${(ok*100/total).toFixed(1)}%`:'--'}
 function activityTone(status){const key=String(status||'unknown').toLowerCase();if(registrationFailureStatuses.has(key)||key==='cancelled')return'failed';if(['imported','success','completed','done','probe_complete'].includes(key))return'success';if(['queued','starting','waiting_solver','waiting_email','import_queued','probe_queued','probe_retry_pending','probe_uncertain','paused','pausing'].includes(key))return'waiting';return'running'}
 function activityTime(value){const date=new Date(Number(value||0)*1000);return Number.isNaN(date.getTime())?'--:--:--':date.toLocaleTimeString('zh-CN',{hour12:false})}
@@ -85,9 +85,9 @@ function renderBatchCards(batches, sessions) {
     const tone = isRunning ? 'running' : (isPaused ? 'paused' : (['imported', 'success', 'done', 'completed'].includes(st) ? 'success' : 'failed'));
 
     const total = Number(b.count || b.total || 0) || 1;
-    const ok = Number(b.imported || b.ok_count || 0);
-    const fail = Number(b.error || b.fail_count || 0);
-    const done = Math.min(total, ok + fail);
+    const ok = Number(b.ok_count || b.imported || 0);
+    const fail = Number(b.fail_count || b.error || 0);
+    const done = Number(b.finished || ok + fail);
     const pct = Math.min(100, Math.round((done / total) * 100));
     const okPct = Math.min(100, Math.round((ok / total) * 100));
     const failPct = Math.min(100 - okPct, Math.round((fail / total) * 100));
@@ -159,8 +159,14 @@ function renderMonitor(batches,sessions){
   monitorState={batches,sessions};
   updatePauseButton(batches);
   renderBatchCards(batches,sessions);
-  const regOk=sessions.filter(registrationSucceeded).length;
-  const regFail=sessions.filter(registrationFailed).length;
+  let batchOk = 0, batchFail = 0, batchFinished = 0;
+  for (const b of batches) {
+    batchOk += Number(b.ok_count || b.imported || 0);
+    batchFail += Number(b.fail_count || b.error || 0);
+    batchFinished += Number(b.finished || (Number(b.ok_count || b.imported || 0) + Number(b.fail_count || b.error || 0)));
+  }
+  const regOk = Math.max(batchOk, sessions.filter(registrationSucceeded).length);
+  const regFail = Math.max(batchFail, sessions.filter(registrationFailed).length);
   let importOk=0,importFail=0,probeOk=0,probeFail=0;
   for(const session of sessions){
     const item=session.auto_import||{};
@@ -180,7 +186,12 @@ function renderMonitor(batches,sessions){
   document.querySelector('#stat-probe-rate').textContent=metricRate(probeOk,probeFail);
   const activities=buildActivities(batches,sessions);
   document.querySelector('#activity-count').textContent=`${activities.length} 条`;
-  document.querySelector('#summary').textContent=batches.length||sessions.length?`${batches.length} 个并发批次，${sessions.length} 个账号会话 · ${registrationTiming(batches,sessions,regOk)}`:'暂无任务';
+  if(batchOk > importOk) importOk = batchOk; document.querySelector('#stat-import-ok').textContent=importOk; document.querySelector('#stat-import-rate').textContent=metricRate(importOk,importFail); const displaySessions = Math.max(batchFinished, regOk + regFail); const summaryEl = document.querySelector('#summary');
+  if (batches.length || sessions.length) {
+    summaryEl.innerHTML = `<span>批次 <strong>${batches.length}</strong> · 累计 <strong>${displaySessions}</strong></span><span>${registrationTiming(batches, sessions, regOk)}</span>`;
+  } else {
+    summaryEl.textContent = '暂无任务';
+  }
   const feed=document.querySelector('#tasks');
   const follow=feed.dataset.ready!=='1'||feed.scrollHeight-feed.scrollTop-feed.clientHeight<72;
   feed.innerHTML=activities.length?activities.map(activityHtml).join(''):'<div class="activity-empty">启动任务后会在这里逐步显示注册动态</div>';
