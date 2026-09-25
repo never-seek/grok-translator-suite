@@ -31,7 +31,14 @@ DATA_DIR = RUNTIME_DIR / "data"
 VENDOR_DIR = APP_DIR / "vendor"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 STATIC_DIR = WEB_DIR / "static"
-SOLVER_PROXY_FILE = Path(os.environ.get("PROGROK_SOLVER_PROXY_FILE") or (VENDOR_DIR / "turnstile-solver" / "proxies.txt"))
+def _resolve_solver_dir() -> Path:
+    for c in [VENDOR_DIR / "turnstile-solver", APP_DIR / "turnstile-solver", BACKEND_DIR / "turnstile-solver"]:
+        if c.is_dir():
+            return c
+    return VENDOR_DIR / "turnstile-solver"
+
+SOLVER_DIR = _resolve_solver_dir()
+SOLVER_PROXY_FILE = Path(os.environ.get("PROGROK_SOLVER_PROXY_FILE") or (SOLVER_DIR / "proxies.txt"))
 EXTRA_SOLVER_PROXY_FILES = [
     Path(path)
     for path in os.environ.get(
@@ -39,7 +46,7 @@ EXTRA_SOLVER_PROXY_FILES = [
         "/opt/grokcli-2api/turnstile-solver/proxies.txt",
     ).split(":")
     if path.strip()
-] + [VENDOR_DIR / "turnstile-solver" / "proxies.txt"]
+] + [SOLVER_DIR / "proxies.txt", VENDOR_DIR / "turnstile-solver" / "proxies.txt", APP_DIR / "turnstile-solver" / "proxies.txt"]
 PROXY_PREFLIGHT_SCRIPT = Path(os.environ.get("PROGROK_PROXY_PREFLIGHT_SCRIPT") or "/usr/local/sbin/progrok-filter-xai-proxies")
 PREFLIGHT_LIVE_OK_FILE = CONFIG_DIR / "progrok_xai_live_ok.txt"
 MIHOMO_SWITCH_SCRIPT = Path(os.environ.get("PROGROK_MIHOMO_SWITCH_SCRIPT") or "/usr/local/sbin/progrok-switch-mihomo-xai")

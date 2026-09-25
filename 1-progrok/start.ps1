@@ -70,6 +70,9 @@ if (-not $env:GROK2API_REG_GLOBAL_INFLIGHT) {
 Write-Host "Recommended registration capacity: $SolverThreads"
 $MainPython = Ensure-Venv (Join-Path $RuntimeRoot ".venv") (Join-Path $BackendRoot "requirements.txt") $BasePython
 $SolverRoot = Join-Path $VendorRoot "turnstile-solver"
+if (-not (Test-Path -LiteralPath $SolverRoot)) {
+    $SolverRoot = Join-Path $Root "turnstile-solver"
+}
 $SolverPython = Ensure-Venv (Join-Path $SolverRoot ".venv") (Join-Path $SolverRoot "requirements.txt") $BasePython
 New-Item -ItemType Directory -Force -Path $PidDir | Out-Null
 

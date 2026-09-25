@@ -36,6 +36,9 @@
 │   ├── browser_configs.py     # Camoufox 反指纹注入配置
 │   ├── Dockerfile             # 求解器容器化构建
 │   └── run_solver.sh          # 求解器启动脚本
+├── vendor/                    # 依赖组件库
+│   ├── grok-build-auth/       # xAI 核心底层协议客户端 (xconsole_client)
+│   └── turnstile-solver/      # 本地求解器组件
 ├── web/                       # 前端管理控制台静态资源
 │   └── static/                # HTML/JS/CSS 页面
 ├── config.example.json        # 配置文件模板

@@ -12,8 +12,9 @@ services:
       - "${GROK2API_PORT:-3001}:8000"
     environment:
       TZ: Asia/Shanghai
+      GROK2API_QUALITY_GUARD_DIR: /var/lib/grok2api-quality-guard
     volumes:
-      - ./2-grok2api/config.yaml:/app/config.yaml:ro
+      - ./2-grok2api/config.yaml:/run/grok2api/config.yaml:ro
       - ./2-grok2api/data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz >/dev/null 2>&1 || exit 0"]

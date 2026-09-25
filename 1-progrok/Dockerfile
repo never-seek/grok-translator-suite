@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -U pip setuptools wheel \
 
 COPY backend/ /app/backend/
 COPY web/ /app/web/
+COPY vendor/ /app/vendor/
 COPY config.example.json /app/config/config.json
 
 WORKDIR /app/backend

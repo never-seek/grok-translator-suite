@@ -33,8 +33,19 @@ from performance_tuning import AdaptiveRegistrationTuner, machine_profile, syste
 BACKEND_DIR = Path(__file__).resolve().parent
 APP_DIR = BACKEND_DIR.parent
 RUNTIME_DATA_DIR = APP_DIR / "runtime" / "data"
-REGISTRATION_STATE_SNAPSHOT = RUNTIME_DATA_DIR / "registration_state_snapshot.json"
-GBA = APP_DIR / "vendor" / "grok-build-auth"
+def _resolve_gba_dir() -> Path:
+    candidates = [
+        APP_DIR / "vendor" / "grok-build-auth",
+        APP_DIR / "grok-build-auth",
+        BACKEND_DIR / "vendor" / "grok-build-auth",
+        BACKEND_DIR / "grok-build-auth",
+    ]
+    for c in candidates:
+        if (c / "xconsole_client").is_dir():
+            return c
+    return candidates[0]
+
+GBA = _resolve_gba_dir()
 ADAPTER_BUILD = "2026-07-26-sso-saved-token-pending-1"
 # Newly registered accounts often need a short settle window before probe.
 REGISTER_PROBE_DELAY_SEC = float(
@@ -1120,11 +1131,14 @@ def ensure_xconsole() -> None:
     Raises RuntimeError with actionable message when unavailable.
     Safe to call multiple times.
     """
-    global _xconsole_ready, _xconsole_error
+    global _xconsole_ready, _xconsole_error, GBA
     if _xconsole_ready:
         return
     if _xconsole_error:
         raise RuntimeError(_xconsole_error)
+
+    if not GBA.is_dir() or not (GBA / "xconsole_client").is_dir():
+        GBA = _resolve_gba_dir()
 
     if not GBA.is_dir():
         _xconsole_error = (

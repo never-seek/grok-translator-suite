@@ -48,8 +48,9 @@ media:
   local:
     path: "./data/media"
 
+# grok2api 内部探针守护（可选功能；实际的小说翻译质检内审由模块 3 translation-validator 提供）
 qualityGuard:
-  enabled: true
+  enabled: false
   model: "grok-4.6"
   mode: passive
   activeInterval: 30m
