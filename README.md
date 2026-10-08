@@ -1,29 +1,52 @@
 # Grok Translator Suite 🚀
 
-> **专为长篇网络小说（韩翻中、日翻中）高强度机翻量身打造的全栈 Grok 基础设施套件。**  
-> 涵盖 **底层极速协议注册**、**高并发反代负载均衡** 与 **独创三级生产级质检中间件**，提供工业级稳定输出。
+> **专为长篇网络小说（韩翻中、日翻中）高强度批量机翻量身打造的全栈 Grok 基础设施套件。**  
+> 涵盖 **Camoufox 真实指纹解盾与极速注册**、**多域名动态冷却邮箱池**、**高并发反代负载均衡** 与 **独创三级生产级质检中间件**，提供工业级稳定输出。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10+-brightgreen.svg)](https://www.python.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker%20Compose-Ready-blue.svg)](docker-compose.yml)
 [![Validation Baseline](https://img.shields.io/badge/Production%20Baseline-Frozen%20v1-success.svg)](3-translation-validator/docs/PRACTICAL_VALIDATOR.md)
+[![D1 Health](https://img.shields.io/badge/Cloudflare%20D1-Healthy%200.86%25-brightgreen.svg)](#3-数据库与容量安全cloudflare-d1-sqlite)
+
+---
+
+## 目录导航
+
+- [为什么需要这套系统？](#为什么需要这套系统)
+- [总体架构与全链路数据流](#总体架构与全链路数据流)
+- [注册架构演进：从纯协议到 Camoufox 真实指纹有头解盾](#注册架构演进从纯协议到-camoufox-真实指纹有头解盾)
+- [基础设施核心机制](#基础设施核心机制)
+  - [1. 代理网络与出口策略 (Mihomo 代理池)](#1-代理网络与出口策略-mihomo-代理池)
+  - [2. 域名系统与邮箱路由 (Cloudflare Email Routing)](#2-域名系统与邮箱路由-cloudflare-email-routing)
+  - [3. 数据库与容量安全 (Cloudflare D1 SQLite)](#3-数据库与容量安全-cloudflare-d1-sqlite)
+- [全量踩坑历史复盘 (3,577 次失败真实数据量化剖析)](#全量踩坑历史复盘-3577-次失败真实数据量化剖析)
+- [翻译模型选型黄金法则与降智声明](#翻译模型选型黄金法则与降智声明)
+  - [核心基准：为什么长篇小说翻译仅限 grok-4.2？](#核心基准为什么长篇小说翻译仅限-grok-42)
+  - [避坑指南：其他模型严重缺陷与降智声明 (grok-4.6 / grok-3 / grok-2)](#避坑指南其他模型严重缺陷与降智声明-grok-46--grok-3--grok-2)
+- [模块拆解与职能划分](#模块拆解与职能划分)
+- [快速上手 (Linux / VPS 一键部署)](#快速上手-linux--vps-一键部署)
+- [日常运维与监控管理 (`./manage.sh`)](#日常运维与监控管理-managesh)
+- [客户端对接指南 (NovelPie / Cherry Studio)](#客户端对接指南-novelpie--cherry-studio)
+- [生产运行基线 (Production Freeze Baseline)](#生产运行基线-production-freeze-baseline)
 
 ---
 
 ## 为什么需要这套系统？
 
-利用大模型（如 Grok-4.20-reasoning）进行网络小说整本百万字批量机翻时，开发者与读者通常会遭遇三大致命瓶颈：
+利用大模型进行网络小说整本百万字批量机翻时，开发者与读者通常会遭遇五大致命瓶颈：
 
-| 致命痛点 | 原生 LLM / 普通反代表现 | Grok Translator Suite 解决方案 |
+| 致命痛点 | 原生 LLM / 普通反代表现 | Grok Translator Suite 工业级解决方案 |
 | :--- | :--- | :--- |
-| **生僻字原文复读** | 模型遇到生僻韩文/复杂长句直接原样吐出韩文，污染整章文本 | **3-Tier Practical Validator**：毫秒级拦截 `raw_repetition_exact` 并自动触发兜底重试 |
-| **格式与空行错位** | 模型经常吞掉空行或吐出 Markdown 标记，破坏客户端按行切片结构 | **Safe Local Repair**：就地原位热补齐空行键值，零额外 Token 损耗 |
+| **生僻字原文复读** | 模型遇到生僻韩文/复杂长句直接原样吐出韩文，整章译文报废 | **3-Tier Practical Validator**：毫秒级拦截 `raw_repetition_exact` 并自动触发降级重试 |
+| **格式与空行错位** | 模型频繁吞掉空行或吐出 Markdown 代码块，导致按行切片无法对齐 | **Safe Local Repair**：就地原位热补齐空行键值，零额外 Token 损耗 |
 | **故障/克苏鲁文本误杀** | 小说中的拟声词、破损对话、克苏鲁乱码被普通质检当成未翻译报错 502 | **OPAQUE_LITERAL 确定性分类器**：音位学分析，精准赦免放行，False Positive = 0 |
-| **账号消耗与额度受限** | 翻译上千万字需要大量账号轮换与高昂验证码打码费 | **ProGrok + 本地 Camoufox 求解器**：全协议极速产号，0 打码费用，自动同步入池 |
+| **人机验证成本与封禁** | 依赖第三方打码平台单次计费极贵，且在 Cloudflare 新盾下频繁报 `UNSOLVABLE` | **Camoufox 真实指纹本地求解器**：0 打码费用，本地 100% 模拟真实浏览器指纹稳定过盾 |
+| **域名频控与批量断流** | 单域名多并发注册迅速触发 `email-signup-unavailable` 封锁，产号中断 | **12+ 域名动态池轮换 + 错峰调度**：严格平摊单域名小时配额，全自动长效续航 |
 
 ---
 
-## 总体架构与数据流向
+## 总体架构与全链路数据流
 
 ```mermaid
 flowchart TD
@@ -33,9 +56,9 @@ flowchart TD
         SDK["OpenAI SDK / Python Scripts"]
     end
 
-    subgraph Suite ["Grok Translator Suite"]
+    subgraph Suite ["Grok Translator Suite 全栈架构"]
         subgraph Mod3 ["3-translation-validator (端口 3002)"]
-            P_INJ["neutral_v1 提示词注入"]
+            P_INJ["neutral_v1 专业提示词注入"]
             AUDIT["3-Tier 质量审计 (PASS / WARN / HARD FAIL)"]
             REPAIR["就地空键修复 (Safe Local Repair)"]
             OPAQUE["OPAQUE_LITERAL 乱码分类器"]
@@ -44,64 +67,219 @@ flowchart TD
 
         subgraph Mod2 ["2-grok2api (端口 3001)"]
             GATEWAY["OpenAI 兼容 API 网关"]
-            POOL["账号池负载均衡 & 配额轮询"]
+            POOL["账号池负载均衡 & 配额轮询 (20,000+ 账号)"]
             ROTATE["Session / Cloudflare Cookie 自动保活"]
-            EGRESS["多出口代理路由 (Egress Nodes)"]
+            EGRESS["多出口代理路由 (Mihomo 代理池)"]
         end
 
         subgraph Mod1 ["1-progrok (端口 3080 / 5072)"]
-            REG["底层纯协议极速注册引擎"]
+            REG["底层注册调度引擎 (:3080)"]
             SOLVER["本地 Camoufox Turnstile 破解器 (:5072)"]
+            MAIL_POLL["Cloudflare D1 邮件轮询提取"]
             AUTO_IMP["一键健康探测并自动导入 Grok2API"]
+        end
+
+        subgraph Infra ["基础设施与网络池"]
+            PROXY_POOL["Mihomo 代理池 (:20172) - 节点动态轮换"]
+            CF_DOMAINS["12+ 域名邮箱池 (Cloudflare Email Routing)"]
+            CF_D1["Cloudflare D1 SQLite (邮件暂存 + 自动修剪)"]
         end
     end
 
-    subgraph Upstream ["xAI 上游服务"]
-        XAI["xAI Official API / Web / Console"]
+    subgraph Upstream ["xAI 官方服务"]
+        XAI["xAI Official Web / API (:443)"]
     end
 
-    Client -->|1. 翻译请求 (JSON Dict)| Mod3
+    %% 翻译链路
+    Client -->|1. 翻译请求 JSON 切片| Mod3
     P_INJ --> GATEWAY
     GATEWAY -->|2. 负载均衡转发| XAI
-    XAI -->|3. 原始译文流| GATEWAY
+    XAI -->|3. 原始流式响应| GATEWAY
     GATEWAY -->|4. 响应回传| Mod3
     Mod3 -->|5. 质检/修复/放行| Client
-    Mod1 -.->|全自动产号 & 凭据同步| Mod2
+
+    %% 注册与运维链路
+    REG -->|调度人机验证| SOLVER
+    REG -->|多域名轮换请求| CF_DOMAINS
+    CF_DOMAINS -->|Catch-all 写入| CF_D1
+    MAIL_POLL -->|拉取验证码| CF_D1
+    REG -->|走出口代理发起注册| PROXY_POOL
+    PROXY_POOL -->|注册流量出口| XAI
+    AUTO_IMP -.->|批量账号与凭证自动同步| POOL
 ```
 
 ---
 
-## 三大核心模块简介
+## 注册架构演进：从纯协议到 Camoufox 真实指纹有头解盾
 
-### 1. [ProGrok 协议注册与本地打码器 (`1-progrok/`)](1-progrok/README.md)
-- **底层纯协议注册**：无需笨重全流程浏览器模拟，极速调用 xAI 注册协议。
-- **本地免打码验证码破解器**：基于 **Camoufox** 反指纹引擎，实现 Cloudflare Turnstile 验证码的高并发本地攻破，告别三方打码平台费用。
-- **自动化闭环**：临时邮箱接收 -> 协议注册 -> 模型可用性探测 (Probe) -> 自动注入 `grok2api` 账号池。
+在构建自动化 Grok 账号池的过程中，注册架构经历了深刻的技术变革：
+
+```
+[早期阶段：纯协议模拟]                                [现代阶段：Camoufox 真实指纹有头解盾]
+REST 抓包模拟 + 第三方打码平台                           深度魔改 Firefox 内核 + 本地多线程求解
+   │                                                        │
+   ├── 优势：发包极快，单号百毫秒级                            ├── 优势：0 第三方打码费用，本地化高并发
+   └── 致命瓶颈：                                           └── 突破：
+       1. xAI 全面升级 Cloudflare Turnstile                     1. C++ 内核级 Canvas / Audio 动态噪声注入
+       2. Token 与 Canvas/WebGL/TLS 指纹强绑定                  2. 彻底抹除 navigator.webdriver 与自动化特征
+       3. 第三方打码纯 Token 被拒 (UNSOLVABLE / 403)            3. 真实物理贝塞尔鼠标轨迹，100% 模拟真实人类
+       4. 持续产生巨额无效打码账单                              4. 本地 2~4 秒极速解盾，无缝衔接底层注册流水线
+```
+
+### 1. 早期纯协议的崩溃
+早期采用逆向 xAI 前端注册接口并通过第三方打码平台（如 YesCaptcha）获取 Turnstile Token 的方式。但随着 xAI 安全策略收紧，Cloudflare Turnstile 将挑战验证与发起请求的浏览器软硬件指纹（Canvas 绘制指纹、WebGL 着色器特征、AudioContext 频响、Navigator 对象、物理鼠标移动事件、TLS Client Hello JA3/JA4 指纹）实施了深度强绑定。第三方打码平台在独立无头环境中生成的 Token 提交给 xAI 后，频繁出现验证失败（历史日志中出现 **864 次 `ERROR_CAPTCHA_UNSOLVABLE`**），纯协议方案被彻底阻断。
+
+### 2. 现代 Camoufox 方案的确立
+为了彻底解决指纹对抗问题，项目全线切换为基于 Firefox 深度魔改的 **Camoufox** 反指纹引擎：
+- **C++ 源码级防探测**：在浏览器渲染底层重构指纹生成逻辑，阻断一切自动化检测特征（无 `navigator.webdriver` 标记，完美伪装各种操作系统与屏幕分辨率）。
+- **本地高并发求解服务 (`turnstile-solver`)**：在服务器部署轻量求解进程（监听 `5072` 端口），采用多线程并发运行，单次人机挑战仅需 2~4 秒。
+- **全流程零外部打码费用**：告别昂贵的打码平台充值，单机全天候自动化产号，成功率稳定在 99% 以上。
+
+---
+
+## 基础设施核心机制
+
+### 1. 代理网络与出口策略 (Mihomo 代理池)
+
+自动化注册与高并发反代极其依赖稳定的网络出口层：
+
+- **Mihomo 代理池集成**：
+  - 本地运行 Mihomo（Clash Meta）内核，监听 `http://127.0.0.1:20172`，聚合优质多节点出口。
+  - 支持按账号粒度或按注册任务批次轮换出口节点，避免流量过度集中。
+- **出口 IP 频控与并发限制**：
+  - xAI 对单个出口 IP 设有严格的注册频率上限。严禁同一代理 IP 在短时间内发起多笔注册请求，否则会直接触发 Cloudflare WAF 质询升级或 xAI 接口 429 频控。
+  - 注册流水线在发起请求前自动执行代理探活与隔离调度，确保单个出口节点请求间歇平稳。
+- **代理 TLS 抖动容错机制**：
+  - 海外 VPS 或住宅代理网络易发生瞬时网络抖动，导致 OpenSSL 握手断开（如实测日志中的 `curl (35) OpenSSL SSL_connect: Connection reset by peer`，历史上出现 **107 次**，占比 3.0%）。
+  - 流水线内置指数退避重试（Exponential Backoff with Jitter）、单次连接 5 秒超时快速熔断与异常节点临时拉黑机制，杜绝因瞬时抖动造成任务雪崩。
+
+---
+
+### 2. 域名系统与邮箱路由 (Cloudflare Email Routing)
+
+注册验证码的高效接收基于 Serverless 邮件路由体系：
+
+- **Cloudflare Email Routing + Catch-all 规则**：
+  - 在每个域名配置 Catch-all 路由规则（`*@your-domain.com`），所有随机前缀邮件全量转发至指定的 Cloudflare Worker。
+  - 完全免除自建 Postfix / Dovecot 邮件服务器的繁重维护与反垃圾封锁风险。
+- **Worker 环境变量与配置**：
+  - Worker 将接收到的邮件主体自动解析并写入 Cloudflare D1 数据库。
+  - 核心配置项：
+    - `MAIL_DOMAINS`：托管的可用域名列表。
+    - `DOMAIN_COOL_DOWN_MINUTES`：单域名冷却周期设置。
+- **12+ 域名动态池轮换与小时级频控瓶颈**：
+  - **实测生产域名池**：系统常态化维护 12 个以上的域名轮换池（涵盖 `.space`, `.online`, `.bond`, `.dpdns.org`, `.site`, `.xyz`, `.pp.ua`, `.shop`, `.club`, `.fun`, `.icu` 等）。
+  - **单域名小时级限额瓶颈**：**单个域名 1 小时内注册超过约 15~20 个账号，xAI 将直接触发 `email-signup-unavailable` 封锁！**
+  - **历史教训**：在 3,577 次历史失败中，单域名频控超限引发的 `email-signup-unavailable` 高达 **2,600 次（72.7%）**，是整个注册系统最核心的风控瓶颈。
+  - **应对机制**：调度器严格执行多域名轮询调度，并在批次注册中引入错峰延迟（例如 3000ms stagger 间隔），将并发压力平摊到整个域名池中，彻底规避单域名小时限额。
+- **域名后缀黑名单防坑**：
+  - xAI 针对部分被严重滥用的低价/免费顶级域名（如 `.in` 后缀，如实测中的 `missing.indevs.in`）实施了全域封禁，一旦提交即返回 `email-domain-rejected`（历史 5 次）。
+  - 系统前置内置域名后缀黑名单过滤，确保仅向高信誉度域名分发注册任务。
+
+---
+
+### 3. 数据库与容量安全 (Cloudflare D1 SQLite)
+
+邮件验证码的存储与清理直接决定了系统的长期免运维能力：
+
+- **Serverless 数据库架构**：
+  - 基于 Cloudflare D1（Serverless SQLite），具备超低延迟、强一致性与原生 Serverless 绑定优势。
+- **为什么验证码邮件必须全自动清理？**
+  - 邮件验证码具有强时效性（仅 5~10 分钟有效）。大批量注册时会产生海量邮件正文，若不主动清理，历史垃圾数据将迅速占满数据库存储配额，导致后续写入抛出 500 错误。
+- **实测容量健康度**：
+  - 当前生产环境 D1 数据库（`local_mailbox`）实际存储占用仅 **43.25 MB**。
+  - 相比 Cloudflare 免费版提供的 **5 GB** 额度，当前容量占用率仅为 **0.86%**，水位极其安全健康。
+- **双重自动修剪与防爆机制**：
+  1. **Worker 入库端就地修剪 (In-flight Auto-Prune)**：当 Worker 接收到新邮件写入时，自动执行 SQL 异步清理 24 小时前包含 `Grok`、`xAI` 关键字的历史验证码邮件。
+  2. **Cloudflare Cron Trigger 定时巡检**：配置定时任务（每 30 分钟触发一次），周期性调用清理端点，对过期邮件和孤儿记录执行批量归档，双保险确保数据库永不爆满。
+
+---
+
+## 全量踩坑历史复盘 (3,577 次失败真实数据量化剖析)
+
+在系统的长期运行与压力测试中，我们对生产日志中的 **3,577 次** 真实失败事件进行了全量量化归因与分类统计。以下为完整的踩坑复盘数据：
+
+| 错误特征 / 异常类型 | 失败次数 | 占比 | 根本原因剖析 (Root Cause) | 工业级解决方案 (Solution) |
+| :--- | :---: | :---: | :--- | :--- |
+| **`email-signup-unavailable`** | **2,600** | **72.7%** | **单域名小时级注册频控触顶**。<br>单个邮箱域名在 1 小时内提交超过 15~20 次注册，xAI 触发反滥用限流，临时阻断该域名的注册。 | 建立 **12+ 域名动态池**，严格实施**单域名动态冷却轮询**与**错峰调度 (3000ms stagger)**，使每个域名的注册频次始终低于阈值。 |
+| **`YesCaptcha ERROR_CAPTCHA_UNSOLVABLE`** | **864** | **24.2%** | **早期第三方打码平台无法过盾**。<br>xAI 升级 Cloudflare Turnstile 浏览器指纹校验，第三方打码纯 Token 与请求环境不匹配，导致验证码频繁解析失败且持续产生扣费。 | **全面弃用第三方打码平台**，架构重构为基于 **Camoufox 真实指纹有头解盾器**，在本地 100% 模拟真实环境，过盾率达 99%+ 且零打码费。 |
+| **`TLS / Proxy Connect Blip (curl 35)`** | **107** | **3.0%** | **代理网络链路瞬时抖动**。<br>海外 VPS 或住宅代理出现 TCP reset 或 TLS 握手断开 (`OpenSSL SSL_connect: Connection reset by peer`)。 | 实施**指数退避重试 (Exponential Backoff)**、**单次连接 5 秒超时熔断**与 **Mihomo 节点健康监测动态剔除**。 |
+| **`email-domain-rejected`** | **5** | **0.1%** | **域名后缀进入 xAI 全局黑名单**。<br>使用了被 xAI 标记为高滥用风险的特定顶级域名（如 `.in`，测试域名 `missing.indevs.in`）。 | 建立**域名后缀黑名单前置过滤器**，全面剔除被封禁的 TLD。 |
+| **`Locator Timeout`** | **1** | **<0.1%** | **页面组件加载超时**。<br>网络极端卡顿导致浏览器 DOM 元素未在指定时限内渲染完毕。 | 增加关键元素加载容错与智能等待。 |
+| **总计** | **3,577** | **100%** | — | **系统完成上述针对性加固后，已实现 20,000+ 账号的长期全自动平稳扩容。** |
+
+---
+
+## 翻译模型选型黄金法则与降智声明
+
+在网络小说批量机翻领域，模型的选择并非“版本号越新越好”，而是对**格式稳定性**、**抗复读能力**与**语境理解深度**的严苛考量。
+
+### 核心基准：为什么长篇小说翻译仅限 grok-4.2？
+
+在整个翻译流水线中，推荐并锁定的核心主力模型为 **`grok-4.2`**（包含 `grok-4.20-reasoning` / `grok-4.20-0309-reasoning`）：
+
+1. **结构指令遵循极其稳固 (JSON Consistency)**：
+   - 长篇网文切块翻译要求严格以 JSON 键值字典对齐（如 `{"1": "译文1", "2": "译文2"}`）。`grok-4.2` 绝不会擅自删除行号、绝不会吞掉空行、绝不会在正文前后输出多余寒暄，完美保障下游按行拼接。
+2. **长篇网文语境理解与文学信达雅**：
+   - 对韩语/日语小说中的敬语系统、人物称谓、异世界网文专有名词、拟声词具有极为出色的文学润色能力，行文流畅自然，毫无生硬机械感。
+3. **极高质检通过率与极低幻觉率**：
+   - 实测 1000+ 章节自然小说翻译中，`grok-4.2` 配合 `3-translation-validator` 的首遍推理放行率达到 **96.9%**，极少出现原文复读或漏行现象。
+
+---
+
+### 避坑指南：其他模型严重缺陷与降智声明 (grok-4.6 / grok-3 / grok-2)
+
+我们强烈建议**不要**在批量小说机翻生产环境中使用以下模型：
+
+#### ❌ `grok-4.6` 缺陷与避坑声明
+- **思维链输出严重污染 (Reasoning Leakage)**：
+  - `grok-4.6` 强制输出大量 `<think>...</think>` 思维链内容，不仅大幅浪费输出 Token 和网络带宽，而且经常在输出完思考过程后发生**截断**，将小说正文下半部分吞掉。
+- **高并发下频繁阻断 (`model_busy` 503)**：
+  - 在反代高并发场景中，`grok-4.6` 虽然在基础探活（Ping/Probe）时显示正常，但在实际流式生成时频繁抛出 `model_busy` 错误，造成大面积批量请求重试失败。
+- **单账号速率与额度极其严苛**：
+  - xAI 对 4.6 版本的单账号并发和每小时请求数施加了极严格的管控，极易触发 429 封禁，无法满足整本小说百万字连续产出的吞吐需求。
+
+#### ❌ `grok-2` / `grok-3` 降智与格式缺陷声明
+- **生僻字原文复读 (Raw Repetition)**：
+  - 遇到生僻韩语字符或复杂复合句时，容易直接“摆烂”，将原文韩文原封不动地输出到译文中，破坏阅读体验。
+- **格式崩坏与空行吞噬**：
+  - 极易遗漏空行键值（如丢失 `{"4": ""}`），导致客户端文本拼接错行、行号整体偏移。
+- **上下文漂移与语义降智**：
+  - 在连续长文本输入时，人物性格口吻与前后设定容易产生剧烈漂移，并伴随明显的幻觉生成。
+
+---
+
+## 模块拆解与职能划分
+
+### 1. [ProGrok 自动化注册与指纹求解器 (`1-progrok/`)](1-progrok/README.md)
+- **底层注册引擎**：集成 Cloudflare D1 邮箱轮询、多域名动态冷却池与 Mihomo 代理出口。
+- **Camoufox 求解器 (`:5072`)**：本地多线程反指纹浏览器，0 外部费用攻破 Turnstile。
+- **自动化闭环**：注册成功后自动执行模型健康探测（Probe），并无缝同步至 Grok2API 账号池。
 
 ### 2. [Grok2API 反代与账号池网关 (`2-grok2api/`)](2-grok2api/README.md)
-- **标准 OpenAI 接口**：对外暴露标准的 `/v1/chat/completions` 与 `/v1/models`，完美兼容一切下游生态。
-- **多账号负载均衡**：自动维护各账号速率限制、请求冷却、剩余配额与出站代理节点。
-- **生产级安全清理脚本**：内附 `scripts/cleanup-db-safe.sh`，强制外键检查级联清理历史审计，避免孤儿数据引发后台 502。
+- **标准 OpenAI 规范**：对外暴露标准的 `/v1/chat/completions` 与 `/v1/models`。
+- **多账号负载均衡**：自动管理 20,000+ 账号的速率限制、并发窗口与会话保活。
+- **安全日志修剪 (`scripts/cleanup-db-safe.sh`)**：支持外键级联检查的安全数据库压缩，防止孤儿数据引发后台 502。
 
-### 3. [API 内审与 Practical Validator (`3-translation-validator/`)](3-translation-validator/README.md)
+### 3. [API 质检与 Practical Validator (`3-translation-validator/`)](3-translation-validator/README.md)
 - **三级实用质检流水线**：
   - `PASS`：合规文本直接返回。
-  - `WARN`：轻度韩文尊称残留（如 `오빠`）、合法游戏界面英文（如 `status`、`HP`）放行并记录遥测，不卡单、不打断翻译。
+  - `WARN`：轻度韩文尊称（如 `오빠`）、合法游戏英文（如 `status`、`HP`）放行并记录遥测。
   - `HARD FAIL`：整句复读韩文原文、大段未翻译、缺失行号则立即拦截并触发降级重试。
-- **OPAQUE_LITERAL 确定性乱码分类器**：利用音位学规则甄别拟声词、破损对话与克苏鲁乱码，彻底解决小说故障文本导致重试超时 502 的痛点。
-- **neutral_v1 翻译提示词动态注入**：上千章小说实战沉淀的 System Prompt，规范标点、术语表继承与行号对齐。
-- **实时运维监控面板**：自带 Web 看板（`http://localhost:3002/audit`），实时观测质检通过率与模型降级情况。
+- **OPAQUE_LITERAL 确定性乱码分类器**：基于音位学规则甄别拟声词与克苏鲁乱码，False Positive = 0。
+- **neutral_v1 专业提示词注入**：小说实战沉淀的 System Prompt，规范标点、术语表与行号对齐。
+- **实时监控看板**：访问 `http://localhost:3002/audit` 查看实时质检率、错误分布与主备降级详情。
 
 ---
 
 ## 快速上手 (Linux / VPS 一键部署)
 
-适合拥有自己服务器（Ubuntu / Debian / CentOS / AlmaLinux 等）的用户，全程仅需执行一条命令：
+适合在自己的 Linux 服务器（Ubuntu / Debian / AlmaLinux 等）上全栈部署：
 
 ### 1. 检出项目
 
 ```bash
-git clone https://github.com/your-username/grok-translator-suite.git
+git clone https://github.com/never-seek/grok-translator-suite.git
 cd grok-translator-suite
 ```
 
@@ -112,18 +290,16 @@ chmod +x deploy.sh manage.sh
 ./deploy.sh
 ```
 
-脚本将自动执行以下全流程：
-1. 检测并自动就绪 Docker 及 Docker Compose 环境；
-2. 自动生成高强度独立随机密钥（JWT Secret、凭据加密 Key、随机管理员密码，做到**全脱敏且千人千密**）；
-3. 预载入纯净 SQLite 数据库表结构；
-4. 容器化一键构建并拉起全套三个模块服务；
-5. 在终端打印你的公网服务访问入口、管理凭据与翻译软件（NovelPie 等）的配置范例。
+脚本将自动执行以下流程：
+1. 检查并准备 Docker 及 Docker Compose 环境；
+2. 自动生成高强度独立随机密钥（JWT Secret、凭据加密 Key、管理员密码）；
+3. 初始化纯净 SQLite 数据库表结构；
+4. 构建并启动三个核心模块服务；
+5. 在终端输出公网访问入口、管理凭据与客户端配置示例。
 
 ---
 
-## 日常运维与监控 (`./manage.sh`)
-
-项目提供了极其简便的运维管理脚本：
+## 日常运维与监控管理 (`./manage.sh`)
 
 ```bash
 # 查看全套服务运行状态与健康度
@@ -135,35 +311,36 @@ chmod +x deploy.sh manage.sh
 # 重启全部服务
 ./manage.sh restart
 
-# 安全清理历史审计与碎片，释放磁盘空间（内置外键保护，防 502）
+# 安全清理历史审计与数据库碎片（内置外键保护）
 ./manage.sh cleanup
 
 # 一键拉取更新并重新加载
 ./manage.sh update
 ```
 
-启动完成后，系统各服务就绪：
-- **翻译客户端对接地址**：`http://你的服务器IP:3002/v1`（质检代理前端）
+服务就绪后各组件端口如下：
+- **翻译客户端接入地址**：`http://你的服务器IP:3002/v1`（质检代理前端）
 - **质检监控看板**：`http://你的服务器IP:3002/audit`
 - **Grok2API 管理后台**：`http://你的服务器IP:3001`
 - **ProGrok 注册控制台**：`http://你的服务器IP:3080`
+- **Camoufox 求解服务**：`http://127.0.0.1:5072`
 
 ---
 
-## 客户端配置指南 (以 NovelPie 为例)
+## 客户端对接指南 (NovelPie / Cherry Studio)
 
-在 **NovelPie (小说派)** 或 **Cherry Studio** 中，添加自定义 OpenAI 兼容提供商：
+在 **NovelPie (小说派)** 或 **Cherry Studio** 中添加自定义 OpenAI 兼容提供商：
 
 - **API Base URL**：`http://你的服务器IP:3002/v1`
-- **API Key**：`sk-grok-translator`（或任意字符串，亦可在 `3-translation-validator` 的配置文件中开启租户 Profile 多 Key 校验）
-- **主选模型 (Primary)**：`grok-4.20-0309-reasoning`（高精度推理首选）
-- **兜底模型 (Fallback)**：`grok-3`（质检代理遇故障自动降级）
+- **API Key**：`sk-grok-translator`（或任意自定义字符串）
+- **主选模型 (Primary)**：`grok-4.20-0309-reasoning`（高精度长篇机翻黄金模型）
+- **兜底模型 (Fallback)**：`grok-3`（质检代理遇极端异常自动降级）
 
 ---
 
 ## 生产运行基线 (Production Freeze Baseline)
 
-本项目搭载的 Practical 3-Tier Validator 判定规则已完成 1000+ 章节真实自然韩语长篇小说翻译的长期稳定性封板验收：
+本项目搭载的 Practical 3-Tier Validator 判定规则已完成 1000+ 章节真实自然长篇小说翻译的长期稳定性封板验收：
 
 ```
 Window Observation Chunks: 1051
@@ -171,9 +348,9 @@ Overall HTTP 200 Success Rate: 98.29%
 First-pass Reasoning Release: 96.9%
 OPAQUE_LITERAL False Positive: 0
 Zero Semantic On-path Latency Overhead
+Current D1 Mailbox Storage Utilization: 0.86% (43.25 MB / 5 GB)
+Active Account Pool Scale: 20,000+ Verified Accounts
 ```
-
-详见技术文档：[Practical Validator 质检标准与运行基线](3-translation-validator/docs/PRACTICAL_VALIDATOR.md)。
 
 ---
 
