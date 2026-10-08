@@ -13,6 +13,7 @@ Providers:
 from __future__ import annotations
 
 import email
+import time
 import random
 import re
 from email import policy
@@ -278,7 +279,11 @@ _normalize_proxy_config = normalize_proxy_config
 
 
 def _extract_codes_and_links(text: str) -> dict[str, list[str]]:
-    codes = sorted(set(re.findall(r"(?<!\d)\d{6,8}(?!\d)", text or "")))
+    hyphen_codes = [m.replace("-", "") for m in re.findall(r"(?<!\d)\d{3}-\d{3}(?!\d)", text or "")]
+    plain_codes = re.findall(r"(?<!\d)\d{6,8}(?!\d)", text or "")
+    noise = {"333333", "888888", "000000", "111111", "222222", "444444", "555555", "666666", "777777", "999999"}
+    valid_plain = [c for c in plain_codes if c not in noise]
+    codes = sorted(set(hyphen_codes + valid_plain))
     links = sorted(set(re.findall(r"https?://[^\s\"'<>)]+", text or "")))
     return {"codes": codes, "links": links}
 
@@ -921,6 +926,89 @@ def gptmail_fetch_messages(
         return out
 
 
+
+class _CfMailResponse:
+    def __init__(self, status_code, content, text):
+        self.status_code = status_code
+        self.content = content
+        self.text = text
+    def json(self):
+        import json as _json
+        try:
+            return _json.loads(self.content.decode("utf-8", errors="replace")) if self.content else {}
+        except Exception:
+            return {}
+
+class _CfMailClient:
+    def __init__(self, proxy=None, timeout=30.0):
+        import os as _os
+        self.proxy = proxy or _os.getenv("PROGROK_MAIL_PROXY") or "http://127.0.0.1:20172"
+        self.timeout = float(timeout)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    def get(self, url, headers=None, params=None):
+        return self._req("GET", url, headers=headers, params=params)
+
+    def post(self, url, headers=None, json=None):
+        return self._req("POST", url, headers=headers, json_data=json)
+
+    def _req(self, method, url, headers=None, json_data=None, params=None):
+        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
+        try:
+            from curl_cffi import requests as c_req
+            r = c_req.request(method, url, headers=headers, json=json_data, params=params, timeout=self.timeout, proxies=proxies, impersonate="chrome")
+            return _CfMailResponse(r.status_code, r.content, r.text)
+        except Exception as exc:
+            import urllib.request as _ur, urllib.parse as _up, json as _js
+            if params:
+                url = url + "?" + _up.urlencode(params)
+            data = _js.dumps(json_data).encode("utf-8") if json_data is not None else None
+            hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", **(headers or {})}
+            req = _ur.Request(url, data=data, headers=hdrs, method=method)
+            opener = _ur.build_opener(_ur.ProxyHandler({"https": self.proxy, "http": self.proxy}))
+            with opener.open(req, timeout=self.timeout) as resp:
+                content = resp.read()
+                return _CfMailResponse(resp.status, content, content.decode("utf-8", errors="replace"))
+
+
+# Permanent ban list (never use)
+_PERMANENT_BANNED_DOMAINS = {"missing.indevs.in"}
+
+def mark_domain_banned(domain: str) -> None:
+    dom = (domain or "").lower().strip()
+    if dom:
+        _PERMANENT_BANNED_DOMAINS.add(dom)
+        print(f"[moemail] Domain {dom} marked permanently banned (rejected by xAI).")
+
+# In-memory dynamic cooldown tracker: domain -> cooldown_until_timestamp
+_DOMAIN_COOLDOWNS: dict[str, float] = {}
+
+def mark_domain_rate_limited(domain: str, cooldown_seconds: float = 3600.0) -> None:
+    dom = (domain or "").lower().strip()
+    if dom:
+        _DOMAIN_COOLDOWNS[dom] = time.time() + cooldown_seconds
+        print(f"[moemail] Domain {dom} marked rate-limited until {time.strftime('%H:%M:%S', time.localtime(_DOMAIN_COOLDOWNS[dom]))}")
+
+def is_domain_available(domain: str) -> bool:
+    dom = (domain or "").lower().strip()
+    if any(b in dom for b in _PERMANENT_BANNED_DOMAINS):
+        return False
+    exp = _DOMAIN_COOLDOWNS.get(dom, 0)
+    return time.time() >= exp
+
+def get_available_domains(domains: list[str]) -> list[str]:
+    now = time.time()
+    return [
+        d for d in domains
+        if not any(b in d.lower() for b in _PERMANENT_BANNED_DOMAINS)
+        and now >= _DOMAIN_COOLDOWNS.get(d.lower().strip(), 0)
+    ]
+
 def cfmail_list_domains(
     *,
     api_key: str | None = None,
@@ -931,7 +1019,7 @@ def cfmail_list_domains(
     base = normalize_cfmail_base_url(base_url or MOEMAIL_BASE_URL)
     headers = _cfmail_headers(api_key=api_key, site_password=site_password)
     try:
-        with httpx.Client(timeout=20.0) as client:
+        with _CfMailClient(timeout=20.0) as client:
             resp = client.get(f"{base}/open_api/settings", headers=headers)
             if resp.status_code >= 400:
                 # Older deploys may expose domains only on authenticated settings.
@@ -987,6 +1075,15 @@ def cfmail_pick_domain(
     )
     if not domains:
         return None
+    available = get_available_domains(domains)
+    if available:
+        return random.choice(available)
+    valid_domains = [d for d in domains if not any(b in d.lower() for b in _PERMANENT_BANNED_DOMAINS)]
+    if valid_domains:
+        earliest_dom = min(valid_domains, key=lambda d: _DOMAIN_COOLDOWNS.get(d.lower().strip(), 0))
+        rem = int(max(0, _DOMAIN_COOLDOWNS.get(earliest_dom.lower().strip(), 0) - time.time()))
+        print(f"[moemail] All domains in cooldown. Earliest is {earliest_dom} ({rem}s remaining).")
+        return earliest_dom
     return random.choice(domains)
 
 
@@ -1078,7 +1175,7 @@ def cfmail_create_mailbox(
     base = normalize_cfmail_base_url(base_url or MOEMAIL_BASE_URL)
     # Never bleed MoeMail default domain into CF.
     dom = (domain or "").strip().lstrip("@").strip(".")
-    if not dom:
+    if not dom or dom.lower() in ("auto", "random", "all") or not is_domain_available(dom):
         dom = cfmail_pick_domain(
             api_key=key, base_url=base, site_password=site_password
         ) or ""
@@ -1103,7 +1200,7 @@ def cfmail_create_mailbox(
     # Prefer admin create (no captcha) when we have a non-JWT key.
     use_admin = bool(key) and "Authorization" not in headers
 
-    with httpx.Client(timeout=30.0) as client:
+    with _CfMailClient(proxy=proxy, timeout=30.0) as client:
         if use_admin:
             resp = client.post(
                 f"{base}/admin/new_address", json=payload, headers=headers
@@ -1159,7 +1256,7 @@ def cfmail_create_mailbox(
         returned_domain = returned_address.rsplit("@", 1)[1] if "@" in returned_address else ""
         if requested_domain and returned_domain and returned_domain != requested_domain:
             desired_address = f"{local}@{requested_domain}"
-            with httpx.Client(timeout=20.0) as client:
+            with _CfMailClient(proxy=proxy, timeout=20.0) as client:
                 tresp = client.post(
                     f"{base}/api/token",
                     json={"address": desired_address},
@@ -1184,7 +1281,7 @@ def cfmail_create_mailbox(
         # Some responses only return jwt + partial; try settings with jwt.
         if jwt:
             try:
-                with httpx.Client(timeout=20.0) as client:
+                with _CfMailClient(proxy=proxy, timeout=20.0) as client:
                     sresp = client.get(
                         f"{base}/api/settings",
                         headers=_cfmail_headers(api_key=str(jwt), bearer=True),
@@ -1242,21 +1339,27 @@ def cfmail_fetch_messages(
     be the JWT when the admin key is not needed.
     """
     jwt = (token or api_key or MOEMAIL_API_KEY or "").strip()
-    if not jwt:
+    target_addr = (address or email_id or "").strip()
+    if not jwt and not target_addr:
         return []
     base = normalize_cfmail_base_url(base_url or MOEMAIL_BASE_URL)
     headers = _cfmail_headers(
-        api_key=jwt, site_password=site_password, bearer=True
+        api_key=jwt, site_password=site_password, bearer=bool(jwt)
     )
 
-    with httpx.Client(timeout=30.0) as client:
+    fetch_params: dict[str, Any] = {"limit": 20, "offset": 0}
+    if target_addr and "@" in target_addr:
+        fetch_params["email"] = target_addr
+        fetch_params["address"] = target_addr
+
+    with _CfMailClient(timeout=30.0) as client:
         # 1) Parsed list (newer deploys)
         items: list[Any] = []
         used_parsed = False
         resp = client.get(
             f"{base}/api/parsed_mails",
             headers=headers,
-            params={"limit": 20, "offset": 0},
+            params=fetch_params,
         )
         if resp.status_code < 400:
             data = resp.json() if resp.content else {}
@@ -1271,7 +1374,7 @@ def cfmail_fetch_messages(
             resp = client.get(
                 f"{base}/api/mails",
                 headers=headers,
-                params={"limit": 20, "offset": 0},
+                params=fetch_params,
             )
             if resp.status_code >= 400:
                 raise RuntimeError(

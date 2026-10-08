@@ -193,72 +193,83 @@ def _poll_interval_sec(raw: Any = None) -> float:
     return max(0.4, min(hinted, 1.5))
 
 
-def request_device_code(session: Any | None = None) -> dict | None:
-    """Request OIDC device code. Prefer shared curl_cffi session when given.
+def request_device_code(session: Any | None = None, proxy: str | None = None) -> dict | None:
+    """Request OIDC device code. Prefer shared curl_cffi session with urllib fallback.
 
-    Retries on xAI rate limits (HTTP 429 / slow_down) — common when several
-    registration workers enter device-flow together.
+    Retries on xAI rate limits and network/TLS blips.
     """
     form = {"client_id": GROK_CLI_CLIENT_ID, "scope": OIDC_SCOPES}
     timeout = _http_timeout()
     retries = _device_flow_retries()
     last_err = ""
+    effective_proxy = (proxy or getattr(session, "proxy", None) or os.getenv("GROK2API_XAI_PROXY") or os.getenv("https_proxy") or "http://127.0.0.1:20172").strip()
+    if "20171" in effective_proxy:
+        effective_proxy = "http://127.0.0.1:20172"
+
     for attempt in range(1, retries + 1):
         _wait_device_flow_slot()
+        # 1. Try session if provided
         if session is not None:
             try:
+                p_kwargs = {} if getattr(session, "proxy", None) else _proxy_kwargs()
                 r = session.post(
                     f"{OIDC_ISSUER}/oauth2/device/code",
                     data=form,
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     impersonate="chrome",
                     timeout=timeout,
-                    **_proxy_kwargs(),
+                    **p_kwargs,
                 )
                 code = int(getattr(r, "status_code", 0) or 0)
                 body = (getattr(r, "text", None) or "")[:300]
                 if code >= 400:
                     last_err = f"HTTP {code}: {body[:200]}"
-                    print(f"  ❌ device/code {last_err}")
+                    print(f"  ❌ device/code session {last_err}")
                     if _is_rate_limited_payload(body, status=code) and attempt < retries:
                         time.sleep(_device_flow_backoff_sec(attempt))
                         continue
-                    return None
-                data = r.json()
-                return data if isinstance(data, dict) else None
+                else:
+                    data = r.json()
+                    if isinstance(data, dict) and data.get("device_code"):
+                        return data
             except Exception as e:  # noqa: BLE001
                 last_err = str(e)
-                print(f"  ❌ device/code: {e}")
+                print(f"  ⚠️ device/code session blip ({attempt}/{retries}): {e}")
                 if attempt < retries and _is_rate_limited_payload(str(e)):
                     time.sleep(_device_flow_backoff_sec(attempt))
                     continue
-                return None
 
-        data = urllib.parse.urlencode(form).encode()
-        req = urllib.request.Request(
-            f"{OIDC_ISSUER}/oauth2/device/code",
-            data=data,
-            method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
+        # 2. Urllib fallback with ProxyHandler
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read())
+            data = urllib.parse.urlencode(form).encode()
+            req = urllib.request.Request(
+                f"{OIDC_ISSUER}/oauth2/device/code",
+                data=data,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            handlers = []
+            if effective_proxy:
+                handlers.append(urllib.request.ProxyHandler({"http": effective_proxy, "https": effective_proxy}))
+            opener = urllib.request.build_opener(*handlers)
+            with opener.open(req, timeout=timeout) as resp:
+                res = json.loads(resp.read().decode())
+                if isinstance(res, dict) and res.get("device_code"):
+                    return res
         except urllib.error.HTTPError as e:
             body = e.read().decode()[:300]
             last_err = f"HTTP {e.code}: {body[:200]}"
-            print(f"  ❌ device/code {last_err}")
+            print(f"  ❌ device/code urllib {last_err}")
             if _is_rate_limited_payload(body, status=e.code) and attempt < retries:
                 time.sleep(_device_flow_backoff_sec(attempt))
                 continue
-            return None
         except Exception as e:  # noqa: BLE001
             last_err = str(e)
-            print(f"  ❌ device/code: {e}")
+            print(f"  ⚠️ device/code urllib attempt {attempt}/{retries} blip: {e}")
             if attempt < retries:
                 time.sleep(_device_flow_backoff_sec(attempt))
                 continue
-            return None
+
     if last_err:
         print(f"  ❌ device/code exhausted retries: {last_err}")
     return None
@@ -271,6 +282,7 @@ def poll_token(
     timeout: int | float = 45,
     *,
     session: Any | None = None,
+    proxy: str | None = None,
     immediate: bool = True,
 ) -> dict | None:
     """Exchange an approved device_code for tokens.
@@ -278,7 +290,7 @@ def poll_token(
     Performance notes:
     - Poll **immediately** after approve (do not sleep first).
     - Use a short interval (default ~1s) instead of the upstream 5s hint.
-    - Prefer curl_cffi session when provided (same TLS fingerprint path).
+    - Prefer curl_cffi session with urllib fallback.
     """
     interval_f = _poll_interval_sec(interval)
     deadline = time.time() + min(float(expires_in or 1800), float(timeout or 45))
@@ -289,6 +301,15 @@ def poll_token(
     }
     http_timeout = _http_timeout()
     first = True
+    effective_proxy = (proxy or getattr(session, "proxy", None) or os.getenv("GROK2API_XAI_PROXY") or os.getenv("https_proxy") or "http://127.0.0.1:20172").strip()
+    if "20171" in effective_proxy:
+        effective_proxy = "http://127.0.0.1:20172"
+
+    handlers = []
+    if effective_proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": effective_proxy, "https": effective_proxy}))
+    opener = urllib.request.build_opener(*handlers)
+
     while time.time() < deadline:
         if not (first and immediate):
             time.sleep(interval_f)
@@ -296,13 +317,14 @@ def poll_token(
 
         if session is not None:
             try:
+                p_kwargs = {} if getattr(session, "proxy", None) else _proxy_kwargs()
                 r = session.post(
                     f"{OIDC_ISSUER}/oauth2/token",
                     data=form,
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     impersonate="chrome",
                     timeout=http_timeout,
-                    **_proxy_kwargs(),
+                    **p_kwargs,
                 )
                 code = int(getattr(r, "status_code", 0) or 0)
                 if code < 400:
@@ -321,11 +343,8 @@ def poll_token(
                 print(f"  ❌ token: {error or f'HTTP {code}'}")
                 return None
             except Exception as e:  # noqa: BLE001
-                # Transient network blip — retry until deadline.
-                if time.time() >= deadline:
-                    print(f"  ❌ token network: {e}")
-                    return None
-                continue
+                # Fall through to urllib fallback below
+                pass
 
         data = urllib.parse.urlencode(form).encode()
         req = urllib.request.Request(
@@ -335,11 +354,11 @@ def poll_token(
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=http_timeout) as resp:
-                return json.loads(resp.read())
+            with opener.open(req, timeout=http_timeout) as resp:
+                return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             try:
-                err = json.loads(e.read())
+                err = json.loads(e.read().decode())
             except Exception:
                 err = {}
             error = err.get("error", "")
@@ -348,7 +367,7 @@ def poll_token(
             if error == "slow_down":
                 interval_f = min(10.0, interval_f + 1.0)
                 continue
-            print(f"  ❌ token: {error}")
+            print(f"  ❌ token urllib: {error}")
             return None
         except Exception as e:  # noqa: BLE001
             if time.time() >= deadline:
@@ -587,6 +606,8 @@ def import_into_project_auth(entry: dict) -> str:
         "expires_at": entry.get("expires_at"),
         "oidc_issuer": entry.get("oidc_issuer", OIDC_ISSUER),
         "oidc_client_id": entry.get("oidc_client_id", GROK_CLI_CLIENT_ID),
+        "sso": entry.get("sso", ""),
+        "password": entry.get("password", ""),
     }
     result = _accounts.import_auth_payload(payload, merge=True)
     if not result.get("ok"):

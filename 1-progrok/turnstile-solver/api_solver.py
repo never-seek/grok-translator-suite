@@ -177,6 +177,7 @@ class TurnstileAPIServer:
         """Boot HTTP + DB; optionally warm browsers (or wait for first task)."""
         self.display_welcome()
         self._pool_lock = asyncio.Lock()
+        self.browser_pool = asyncio.Queue()
         try:
             await init_db()
             # Periodic result cleanup (independent of browsers)
@@ -212,6 +213,7 @@ class TurnstileAPIServer:
             playwright = await async_playwright().start()
             self._playwright = playwright
         elif self.browser_type == "camoufox":
+            self._camoufox_list = []
             camoufox = AsyncCamoufox(headless=self.headless)
             self._camoufox = camoufox
 
@@ -266,8 +268,10 @@ class TurnstileAPIServer:
                     headless=self.headless,
                     args=browser_args
                 )
-            elif self.browser_type == "camoufox" and camoufox:
-                browser = await camoufox.start()
+            elif self.browser_type == "camoufox":
+                cmx = AsyncCamoufox(headless=self.headless)
+                self._camoufox_list.append(cmx)
+                browser = await cmx.start()
 
             if browser:
                 item = (i + 1, browser, config)
@@ -297,6 +301,14 @@ class TurnstileAPIServer:
 
     async def _drain_pool_discard(self) -> None:
         """Empty the asyncio queue without closing browsers (caller closes)."""
+        current_loop = None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        if self.browser_pool is None or (current_loop and getattr(self.browser_pool, '_loop', None) != current_loop):
+            self.browser_pool = asyncio.Queue()
+            return
         while True:
             try:
                 self.browser_pool.get_nowait()
@@ -583,6 +595,12 @@ class TurnstileAPIServer:
                     logger.warning(f"Playwright stop failed: {e}")
             self._playwright = None
 
+        if hasattr(self, '_camoufox_list') and self._camoufox_list:
+            for cmx in self._camoufox_list:
+                await self._close_maybe_async(
+                    cmx, "aclose", "close", "__aexit__", label="Camoufox"
+                )
+            self._camoufox_list = []
         if self._camoufox is not None:
             # AsyncCamoufox may expose aclose / __aexit__; best-effort.
             await self._close_maybe_async(
@@ -606,27 +624,39 @@ class TurnstileAPIServer:
         # Keep last_used as historical activity; do not bump it here or reclaim loops thrash.
         logger.info("Browser pool reclaimed (idle / rebuild)")
 
-    async def _ensure_pool(self) -> None:
+    async def _ensure_pool(self, force: bool = False) -> None:
         """Make sure the browser pool is warm before solving."""
         self._last_used = time.time()
-        if self._pool_ready and self.browser_pool.qsize() > 0:
+        current_loop = asyncio.get_running_loop()
+        if self.browser_pool is None or getattr(self.browser_pool, '_loop', None) != current_loop:
+            self.browser_pool = asyncio.Queue()
+            self._pool_ready = False
+        if not force and self._pool_ready and self.browser_pool.qsize() > 0:
             return
         if self._pool_lock is None:
             self._pool_lock = asyncio.Lock()
         async with self._pool_lock:
             self._last_used = time.time()
-            if self._pool_ready and self.browser_pool.qsize() > 0:
+            if not force and self._pool_ready and self.browser_pool.qsize() > 0:
                 return
             # A solve task increments _in_flight before calling _ensure_pool().
             # If the pool is marked ready but the queue is already empty and no
             # other solve owns a browser, the pool is stale and must be rebuilt.
-            if self._pool_ready and self.browser_pool.empty():
+            if not force and self._pool_ready and self.browser_pool.empty():
                 other_in_flight = max(0, int(self._in_flight or 0) - 1)
-                if other_in_flight > 0:
-                    # Another solve may be holding the browser; wait for it.
+                alive_browsers = [
+                    b for _, b, _ in (self._owned_browsers or [])
+                    if hasattr(b, 'is_connected') and b.is_connected()
+                ]
+                if other_in_flight > 0 and len(alive_browsers) > 0:
+                    # Another solve may be holding an alive browser; wait for it.
                     return
                 logger.warning(
-                    "Browser pool marked ready but queue is empty; rebuilding stale pool"
+                    f"Browser pool marked ready but queue is empty (alive={len(alive_browsers)}/owned={len(self._owned_browsers or [])}); rebuilding stale pool"
+                )
+            if force:
+                logger.warning(
+                    f"Forcing browser pool rebuild (force=True, in_flight={self._in_flight}, queue={self.browser_pool.qsize() if self.browser_pool else 0})"
                 )
             logger.info(
                 f"Warming browser pool (thread={self.thread_count}, type={self.browser_type})"
@@ -1187,13 +1217,13 @@ class TurnstileAPIServer:
                 # was reclaimed mid-wait (idle reaper race under load).
                 try:
                     index, browser, browser_config = await asyncio.wait_for(
-                        self.browser_pool.get(), timeout=90.0
+                        self.browser_pool.get(), timeout=25.0
                     )
                 except asyncio.TimeoutError:
-                    logger.warning("Browser pool get timeout (90s) — rebuilding pool")
-                    await self._ensure_pool()
+                    logger.warning("Browser pool get timeout (25s) — force-rebuilding pool")
+                    await self._ensure_pool(force=True)
                     index, browser, browser_config = await asyncio.wait_for(
-                        self.browser_pool.get(), timeout=60.0
+                        self.browser_pool.get(), timeout=35.0
                     )
                 acquired = True
                 self._last_used = time.time()
@@ -1202,17 +1232,20 @@ class TurnstileAPIServer:
                 await save_result(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": 0, "error": str(e)})
                 return
 
+            fatal_browser_error = False
             try:
                 if hasattr(browser, 'is_connected') and not browser.is_connected():
-                    if self.debug:
-                        logger.warning(f"Browser {index}: Browser disconnected, skipping")
-                    await self.browser_pool.put((index, browser, browser_config))
+                    logger.warning(f"Browser {index}: Browser disconnected, discarding and triggering pool rebuild")
                     acquired = False
                     await save_result(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": 0, "error": "browser_disconnected"})
+                    asyncio.create_task(self._ensure_pool(force=True))
                     return
             except Exception as e:
-                if self.debug:
-                    logger.warning(f"Browser {index}: Cannot check browser state: {str(e)}")
+                logger.warning(f"Browser {index}: Cannot check browser state ({e}), discarding and rebuilding pool")
+                acquired = False
+                await save_result(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": 0, "error": f"browser_disconnected: {e}"})
+                asyncio.create_task(self._ensure_pool(force=True))
+                return
 
             proxy = None
             if self.proxy_support:
@@ -1254,7 +1287,11 @@ class TurnstileAPIServer:
                                 f"Browser {index}: new_context failed ({ctx_err}); "
                                 f"retry minimal options"
                             )
-                        context = await browser.new_context(no_viewport=True)
+                        try:
+                            context = await browser.new_context(no_viewport=True)
+                        except Exception as ctx_retry_err:
+                            fatal_browser_error = True
+                            raise
 
                     page = await context.new_page()
                     try:
@@ -1455,6 +1492,9 @@ class TurnstileAPIServer:
                         )
                 except Exception as e:
                     last_error = str(e)[:240]
+                    err_msg = str(e)
+                    if any(kw in err_msg for kw in ["Connection closed", "Target closed", "closed while reading", "pipe closed", "browser has been closed", "broken pipe"]):
+                        fatal_browser_error = True
                     logger.error(
                         f"Browser {index}: Error solving Turnstile round {round_i}: {e}"
                     )
@@ -1491,20 +1531,22 @@ class TurnstileAPIServer:
         finally:
             try:
                 if acquired and browser is not None and index is not None:
-                    connected = True
-                    try:
-                        if hasattr(browser, 'is_connected'):
-                            connected = bool(browser.is_connected())
-                    except Exception:
-                        connected = True
+                    connected = not fatal_browser_error
+                    if connected:
+                        try:
+                            if hasattr(browser, 'is_connected'):
+                                connected = bool(browser.is_connected())
+                        except Exception:
+                            connected = False
                     if connected:
                         await self.browser_pool.put((index, browser, browser_config))
                         if self.debug:
                             logger.debug(f"Browser {index}: Browser returned to pool")
-                    elif self.debug:
+                    else:
                         logger.warning(
-                            f"Browser {index}: Browser disconnected, not returning to pool"
+                            f"Browser {index}: Browser disconnected or fatal driver error, discarding; queue={self.browser_pool.qsize()}; triggering pool rebuild"
                         )
+                        asyncio.create_task(self._ensure_pool(force=True))
             except Exception as e:
                 if self.debug:
                     logger.warning(

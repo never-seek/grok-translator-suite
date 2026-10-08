@@ -38,7 +38,7 @@
 - **Cloudflare Email Routing + Catch-all 接收**：
   - 在 Cloudflare 域名控制台开启 Catch-all 规则，任意随机前缀邮件直接交由 Cloudflare Worker 接收并写入 D1。
 - **12+ 域名动态池与小时级频控瓶颈**：
-  - **实测域名池**：系统维护包含 `miss114514.space`, `jesurbenin.online`, `fuckchatgpt.bond`, `missing.dpdns.org`, `miss114514.site`, `miss114514.xyz`, `missing.pp.ua`, `miss114514.shop`, `miss114514.club`, `miss114514.fun`, `miss114514.online`, `miss114514.icu` 等在内的 12+ 域名轮换池。
+  - **实测域名池**：系统维护包含 `example1.space`, `example2.online`, `example3.bond`, `example4.org`, `example5.site`, `example6.xyz`, `example7.ua`, `example8.shop` 等在内的 12+ 域名轮换池。
   - **单域名小时频控阈值**：单个邮箱域名 1 小时内注册超过约 15~20 个账号，xAI 将直接触发 `email-signup-unavailable` 封锁（历史 3,577 次失败中占 **2,600 次即 72.7%**！）。
   - **应对机制**：调度器按批次在 12+ 域名池中均衡轮换，并引入 3000ms stagger 错峰延迟，将单域名每小时注册频次严格压制在安全阈值以内。
 - **域名后缀黑名单防坑**：

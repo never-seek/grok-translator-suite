@@ -33,19 +33,8 @@ from performance_tuning import AdaptiveRegistrationTuner, machine_profile, syste
 BACKEND_DIR = Path(__file__).resolve().parent
 APP_DIR = BACKEND_DIR.parent
 RUNTIME_DATA_DIR = APP_DIR / "runtime" / "data"
-def _resolve_gba_dir() -> Path:
-    candidates = [
-        APP_DIR / "vendor" / "grok-build-auth",
-        APP_DIR / "grok-build-auth",
-        BACKEND_DIR / "vendor" / "grok-build-auth",
-        BACKEND_DIR / "grok-build-auth",
-    ]
-    for c in candidates:
-        if (c / "xconsole_client").is_dir():
-            return c
-    return candidates[0]
-
-GBA = _resolve_gba_dir()
+REGISTRATION_STATE_SNAPSHOT = RUNTIME_DATA_DIR / "registration_state_snapshot.json"
+GBA = APP_DIR / "vendor" / "grok-build-auth"
 ADAPTER_BUILD = "2026-07-26-sso-saved-token-pending-1"
 # Newly registered accounts often need a short settle window before probe.
 REGISTER_PROBE_DELAY_SEC = float(
@@ -111,7 +100,7 @@ LOCAL_SOLVER_URL = (
     or os.environ.get("LOCAL_SOLVER_URL")
     or os.environ.get("GROK2API_YESCAPTCHA_ENDPOINT")
     or os.environ.get("YESCAPTCHA_ENDPOINT")
-    or "http://172.19.0.1:5073"
+    or "http://127.0.0.1:5072"
 ).strip().rstrip("/")
 
 # Hard cap for multi-thread registration concurrency only (YesCaptcha + xAI rate limits).
@@ -135,10 +124,12 @@ LOCAL_SOLVER_POLL_SEC = float(
 _sessions: dict[str, dict[str, Any]] = {}
 _batches: dict[str, dict[str, Any]] = {}
 _lock = threading.RLock()
-_BATCHES_FILE = Path(
-    os.getenv("PROGROK_BATCHES_FILE")
-    or (RUNTIME_DATA_DIR / "batches.json")
-)
+_DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "runtime" / "data"
+_BATCHES_FILE = Path(os.environ.get("PROGROK_BATCHES_FILE", str(_DEFAULT_DATA_DIR / "batches.json")))
+try:
+    _BATCHES_FILE.parent.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
 
 
 def _persist_batches_to_disk() -> None:
@@ -382,7 +373,7 @@ def _snapshot_reg_config(
         "expiry_ms": expiry_ms,
         "concurrency": concurrency,
         "stagger_ms": stagger_ms,
-        "local_solver_url": "http://172.19.0.1:5073",
+        "local_solver_url": "http://127.0.0.1:5072",
         "mail_provider": (mail_provider or "moemail").strip().lower() or "moemail",
         "post_registration": dict(post_registration or {}),
         "auto_tune_enabled": bool(auto_tune_enabled),
@@ -1131,14 +1122,11 @@ def ensure_xconsole() -> None:
     Raises RuntimeError with actionable message when unavailable.
     Safe to call multiple times.
     """
-    global _xconsole_ready, _xconsole_error, GBA
+    global _xconsole_ready, _xconsole_error
     if _xconsole_ready:
         return
     if _xconsole_error:
         raise RuntimeError(_xconsole_error)
-
-    if not GBA.is_dir() or not (GBA / "xconsole_client").is_dir():
-        GBA = _resolve_gba_dir()
 
     if not GBA.is_dir():
         _xconsole_error = (
@@ -1202,7 +1190,7 @@ def _local_solver_base_url(url: str | None = None) -> str:
         or (LOCAL_SOLVER_URL or "").strip()
         or os.environ.get("GROK2API_LOCAL_SOLVER_URL")
         or os.environ.get("LOCAL_SOLVER_URL")
-        or "http://172.19.0.1:5073"
+        or "http://127.0.0.1:5072"
     ).strip().rstrip("/")
     # Registration must never hit an external "local" URL; force loopback.
     if (
@@ -1210,7 +1198,7 @@ def _local_solver_base_url(url: str | None = None) -> str:
         or "127.0.0.1" not in raw
         and "localhost" not in raw
     ):
-        return "http://172.19.0.1:5073"
+        return "http://127.0.0.1:5072"
     return raw
 
 
@@ -1585,6 +1573,7 @@ def _make_email_receiver(
         dom = (domain or MOEMAIL_DOMAIN or "").strip().lstrip("@").strip(".")
     # Generate a fresh local-part for every mailbox, including every job in a batch.
     # Ignore legacy fixed-prefix values such as "grok".
+    # 12-character random lowercase/digits proved compatible with xAI and CF mailbox
     alphabet = string.ascii_lowercase + string.digits
     pre = "".join(secrets.choice(alphabet) for _ in range(12))
 
@@ -1888,6 +1877,8 @@ def _prepare_registration_session(
     with _lock:
         _sessions[sid] = sess
         if batch_id and batch_id in _batches:
+            if "session_ids" not in _batches[batch_id] or not isinstance(_batches[batch_id]["session_ids"], list):
+                _batches[batch_id]["session_ids"] = []
             _batches[batch_id]["session_ids"].append(sid)
             _batches[batch_id]["updated_at"] = _now()
             _mirror_reg_batch(batch_id, dict(_batches[batch_id]))
@@ -3178,48 +3169,6 @@ def _run_registration(
 
     try:
         _check_cancel()
-        ensure_xconsole()
-        from xconsole_client import (
-            XConsoleAuthClient,
-            YesCaptchaSolver,
-            xai_oauth_login_protocol,
-        )
-        from xconsole_client import config as C
-        from xconsole_client.oauth_protocol import extract_cookies_from_auth_client
-        from xconsole_client.xai_oauth import (
-            CLIPROXYAPI_GROK_HEADERS,
-            build_cliproxyapi_auth_record,
-        )
-        import accounts
-        from config import UPSTREAM_BASE
-
-        update("registering", "visiting signup page")
-        _check_cancel()
-        if _same_proxy(proxy, LOCAL_MIHOMO_PROXY):
-            switch_msg = _switch_mihomo_xai_if_needed("before registration")
-            if switch_msg:
-                print(f"[grok-build-auth] local proxy preflight: {switch_msg}")
-        client = XConsoleAuthClient(
-            debug=True,
-            proxy=proxy or "",
-            signup_url="https://accounts.x.ai/sign-up?redirect=grok-com",
-        )
-        client.visit_home()
-        _check_cancel()
-        client.load_signup_page()
-
-        sitekey = (
-            getattr(client, "turnstile_sitekey", None)
-            or getattr(C, "TURNSTILE_SITEKEY", None)
-            or ""
-        ).strip()
-        website_url = (getattr(client, "signup_url", None) or C.SIGNUP_URL or "").strip()
-        if not sitekey:
-            raise RuntimeError(
-                "Turnstile sitekey missing. Signup page scrape failed and "
-                "config TURNSTILE_SITEKEY is empty."
-            )
-
         provider = (
             CAPTCHA_PROVIDER
             or os.environ.get("GROK2API_CAPTCHA_PROVIDER")
@@ -3228,17 +3177,10 @@ def _run_registration(
         ).strip().lower()
         if provider not in {"local", "yescaptcha"}:
             provider = "local"
-        mode = normalize_solver_mode(os.environ.get("GROK2API_SOLVER_MODE") or SOLVER_MODE or provider)
-        fallback_enabled = str(os.environ.get("PROGROK_SOLVER_FALLBACK_ENABLED", "1")).lower() not in {"0", "false", "no", "off"}
-        provider_order = solver_provider_order(mode, fallback_enabled=fallback_enabled)
 
         if provider == "local":
-            # Always use in-container inline solver; ignore external/custom URL.
             endpoint = _local_solver_base_url(None)
             solver_key = "local"
-            auto_fallback = False
-            # Re-check right before first solve so a mid-batch solver restart
-            # doesn't burn mailboxes while HTTP is still down.
             wait = wait_for_local_solver(
                 endpoint,
                 timeout_sec=min(60.0, max(5.0, LOCAL_SOLVER_WAIT_SEC)),
@@ -3250,20 +3192,12 @@ def _run_registration(
                     or f"本地过盾未就绪，无法开始打码: {endpoint}"
                 )
         else:
-            # Cloud YesCaptcha only; never inherit local solver endpoint.
             endpoint = (
                 os.environ.get("GROK2API_YESCAPTCHA_ENDPOINT")
                 or os.environ.get("YESCAPTCHA_ENDPOINT")
                 or os.environ.get("YESCAPTCHA_API_BASE")
                 or ""
             ).strip() or None
-            # Guard against accidental local leftover endpoint.
-            if endpoint and (
-                "127.0.0.1" in endpoint
-                or "localhost" in endpoint
-                or endpoint.rstrip("/").endswith(":5072")
-            ):
-                endpoint = None
             solver_key = (
                 yescaptcha_key
                 or YESCAPTCHA_KEY
@@ -3271,618 +3205,55 @@ def _run_registration(
                 or os.environ.get("YESCAPTCHA_API_KEY")
                 or ""
             ).strip()
-            if not solver_key or solver_key == "local":
-                raise RuntimeError("YesCaptcha 模式需要有效的 YESCAPTCHA_KEY")
-            auto_fallback = True
 
-        def _turnstile_progress(msg: str) -> None:
-            # Raise cancel out of solver polling so stop doesn't wait full captcha timeout.
-            _check_cancel()
-            update("solving_turnstile", f"Turnstile: {msg}")
-
-        solver = YesCaptchaSolver(
-            solver_key,
-            endpoint=endpoint,
-            # Keep captcha wait bounded; cancel still interrupts via on_progress.
-            timeout=float(os.environ.get("GROK2API_YESCAPTCHA_TIMEOUT", "120") or 120),
-            poll_interval=float(os.environ.get("GROK2API_YESCAPTCHA_POLL", "2") or 2),
-            debug=True,
-            on_progress=_turnstile_progress,
-            # Local: no cloud fallback. YesCaptcha: allow cn/global peer fallback.
-            auto_fallback_endpoint=auto_fallback,
-        )
-        print(
-            f"[grok-build-auth] turnstile provider={provider} website_url={website_url} "
-            f"sitekey={sitekey} endpoint={getattr(solver, '_endpoint', '?')}"
+        from camoufox_register_adapter import run_camoufox_registration
+        reg_result = run_camoufox_registration(
+            sid=sid,
+            email=email,
+            password=password,
+            proxy=proxy or "",
+            solver_endpoint=endpoint,
+            solver_key=solver_key,
+            provider=provider,
+            receiver=receiver,
+            update_cb=update,
+            check_cancel_cb=_check_cancel,
         )
 
-        # Critical ordering:
-        # 1) solve Turnstile first (slow, ~20-40s)
-        # 2) send email code
-        # 3) wait for mailbox code
-        # 4) immediately verify + create_account
-        # Old order verified the code then waited for captcha; create_account then
-        # failed with WKE=email:invalid-validation-code because the code expired /
-        # was single-use after the slow captcha step.
-        solver_label = "本地过盾" if provider == "local" else "YesCaptcha"
-        update("solving_turnstile", f"solving Turnstile via {solver_label} (before email code)")
-        _check_cancel()
-
-        def _solve_turnstile(url: str, *, premium: bool = True) -> Any:
-            # Bound local solves to the configured Camoufox browser slots while
-            # keeping YesCaptcha requests independently parallel.
-            # Local Camoufox has no premium tier — force Proxyless only.
-            use_premium = bool(premium) and provider != "local"
-            kwargs = {
-                "website_url": url,
-                "website_key": sitekey,
-                "premium": use_premium,
-                "fallback_non_premium": True,
-            }
-            if provider == "local":
-                with _local_captcha_slots:
-                    _check_cancel()
-                    try:
-                        return solver.solve_turnstile(**kwargs)
-                    except Exception as e:
-                        # Camoufox queue meltdown / timeout → brief global pause
-                        msg = str(e).lower()
-                        if any(
-                            k in msg
-                            for k in (
-                                "timeout",
-                                "timed out",
-                                "queue",
-                                "busy",
-                                "no browser",
-                                "target closed",
-                                "crashed",
-                            )
-                        ):
-                            _note_reg_pressure(f"local captcha: {e}")
-                        raise
-            return solver.solve_turnstile(**kwargs)
-
-        try:
-            # Local: Proxyless only. Remote YesCaptcha: premium M1 first.
-            turnstile = _solve_turnstile(website_url, premium=(provider != "local"))
-        except _RegCancelled:
-            raise
-        except Exception as captcha_err:
-            _check_cancel()
-            if provider == "local" and "yescaptcha" in provider_order[1:]:
-                remote_key = (
-                    yescaptcha_key
-                    or YESCAPTCHA_KEY
-                    or os.environ.get("GROK2API_YESCAPTCHA_KEY")
-                    or os.environ.get("YESCAPTCHA_API_KEY")
-                    or ""
-                ).strip()
-                if remote_key and remote_key != "local":
-                    update("solving_turnstile", f"local Turnstile failed ({captcha_err}); fallback to YesCaptcha")
-                    provider = "yescaptcha"
-                    endpoint = (
-                        os.environ.get("GROK2API_YESCAPTCHA_ENDPOINT")
-                        or os.environ.get("YESCAPTCHA_ENDPOINT")
-                        or os.environ.get("YESCAPTCHA_API_BASE")
-                        or ""
-                    ).strip() or None
-                    if endpoint and (
-                        "127.0.0.1" in endpoint
-                        or "localhost" in endpoint
-                        or endpoint.rstrip("/").endswith(":5072")
-                    ):
-                        endpoint = None
-                    solver = YesCaptchaSolver(
-                        remote_key,
-                        endpoint=endpoint,
-                        timeout=float(os.environ.get("GROK2API_YESCAPTCHA_TIMEOUT", "120") or 120),
-                        poll_interval=float(os.environ.get("GROK2API_YESCAPTCHA_POLL", "2") or 2),
-                        debug=True,
-                        on_progress=_turnstile_progress,
-                        auto_fallback_endpoint=True,
-                    )
-            if provider == "yescaptcha" and "local" in provider_order[1:]:
-                local_endpoint = _local_solver_base_url(None)
-                wait = wait_for_local_solver(
-                    local_endpoint,
-                    timeout_sec=min(60.0, max(5.0, LOCAL_SOLVER_WAIT_SEC)),
-                    progress=lambda m: update("waiting_solver", m),
-                )
-                if wait.get("ready"):
-                    update("solving_turnstile", f"YesCaptcha failed ({captcha_err}); fallback to local solver")
-                    provider = "local"
-                    solver = YesCaptchaSolver(
-                        "local",
-                        endpoint=local_endpoint,
-                        timeout=float(os.environ.get("GROK2API_YESCAPTCHA_TIMEOUT", "120") or 120),
-                        poll_interval=float(os.environ.get("GROK2API_YESCAPTCHA_POLL", "2") or 2),
-                        debug=True,
-                        on_progress=_turnstile_progress,
-                        auto_fallback_endpoint=False,
-                    )
-            alt_url = "https://accounts.x.ai/sign-up?redirect=cloud-console"
-            if website_url.rstrip("/") == alt_url.rstrip("/"):
-                alt_url = "https://accounts.x.ai/sign-up?redirect=grok-com"
-            update(
-                "solving_turnstile",
-                f"primary Turnstile failed ({captcha_err}); retry {alt_url}",
-            )
-            turnstile = _solve_turnstile(alt_url, premium=False)
-        if not turnstile:
-            raise RuntimeError("YesCaptcha returned empty Turnstile token")
-        _check_cancel()
-
-        # Password can be validated any time before create; do it while warm.
-        client.validate_password(email, password)
-
-        update("registering", "sending email validation code")
-        _check_cancel()
-        send_res = client.create_email_validation_code(email)
-        if hasattr(send_res, "ok") and send_res.ok is False:
-            print(
-                f"[grok-build-auth] CreateEmailValidationCode ok=False "
-                f"http={getattr(send_res, 'http_status', None)} "
-                f"grpc={getattr(send_res, 'grpc_status', None)}"
-            )
-
-        update("waiting_email", "waiting for xAI verification code")
-        # Poll mailbox with cancel-aware receiver so stop lands in ~0.25–1s.
-        _check_cancel()
-
-        def _mail_should_cancel() -> bool:
-            # _check_cancel raises _RegCancelled when stop is requested.
-            _check_cancel()
-            return False
-
-        try:
-            code = receiver.wait_for_code(
-                timeout=120.0,
-                should_cancel=_mail_should_cancel,
-                poll_interval=1.0,
-            )
-        except TypeError:
-            # Older receiver signature fallback.
-            code = None
-            mail_deadline = time.time() + 120.0
-            while time.time() < mail_deadline:
-                _check_cancel()
-                try:
-                    code = receiver.wait_for_code(
-                        timeout=min(4.0, max(1.0, mail_deadline - time.time()))
-                    )
-                except Exception:
-                    code = None
-                if code:
-                    break
-        if not code:
-            raise RuntimeError("email verification code timeout")
-        code = str(code or "").strip().upper().replace(" ", "").replace("-", "")
-        if len(code) != 6:
-            raise RuntimeError(
-                f"invalid email verification code shape: {code!r} "
-                f"(expect 6 alnum chars)"
-            )
-        update("registering", f"code received: {code}; verifying + creating immediately")
-
-        # Prefer empty castle token (YesCaptcha cannot mint Castle fingerprints).
-        # Retry create_account once with a fresh Turnstile + fresh email code when
-        # the first flight is a structured hard error (expired code / turnstile).
-        create_attempts = 2
-        res = None
-        sc: list[str] = []
-        rsc_body = ""
-        rsc_preview = ""
-        http_status = 0
-        signup_err: str | None = None
-        for ca in range(1, create_attempts + 1):
-            if ca > 1:
-                # Full refresh path for invalid code / captcha failures.
-                update(
-                    "solving_turnstile",
-                    f"create_account hard error ({signup_err}); refreshing Turnstile+email code",
-                )
-                try:
-                    turnstile = _solve_turnstile(
-                        website_url, premium=(provider != "local")
-                    )
-                except Exception as captcha_err:  # noqa: BLE001
-                    print(f"[grok-build-auth] turnstile refresh failed: {captcha_err}")
-                    break
-                # New email code required after invalid-validation-code.
-                try:
-                    client.create_email_validation_code(email)
-                    update("waiting_email", "waiting for fresh xAI verification code")
-                    code = receiver.wait_for_code(timeout=120)
-                    code = (
-                        str(code or "")
-                        .strip()
-                        .upper()
-                        .replace(" ", "")
-                        .replace("-", "")
-                    )
-                    if len(code) != 6:
-                        raise RuntimeError(f"fresh email code invalid: {code!r}")
-                    update("registering", f"fresh code received: {code}")
-                except Exception as mail_err:  # noqa: BLE001
-                    print(f"[grok-build-auth] email code refresh failed: {mail_err}")
-                    break
-
-            # verify immediately before create_account (same second when possible)
-            try:
-                vres = client.verify_email_validation_code(email, code)
-                print(
-                    f"[grok-build-auth] VerifyEmailValidationCode "
-                    f"ok={getattr(vres, 'ok', None)} "
-                    f"http={getattr(vres, 'http_status', None)} "
-                    f"grpc={getattr(vres, 'grpc_status', None)}"
-                )
-            except Exception as v_err:  # noqa: BLE001
-                print(f"[grok-build-auth] verify_email error: {v_err}")
-
-            update(
-                "creating_account",
-                f"creating xAI account (attempt {ca}/{create_attempts})",
-            )
-            res = client.create_account(
-                email=email,
-                given_name="User",
-                family_name="Grok",
-                password=password,
-                email_validation_code=code,
-                turnstile_token=turnstile,
-                castle_request_token="",
-                conversion_id=str(uuid.uuid4()),
-            )
-            sc = list(getattr(res, "set_cookies", None) or [])
-            rsc_body = getattr(res, "rsc_body", "") or ""
-            rsc_preview = rsc_body[:800]
-            http_status = int(getattr(res, "http_status", 0) or 0)
-            try:
-                signup_err = client.extract_signup_error(rsc_body)
-            except Exception:
-                signup_err = None
-            print(f"[grok-build-auth] create_account HTTP={http_status}")
-            print(f"[grok-build-auth] create_account set-cookies count={len(sc)}")
-            print(f"[grok-build-auth] create_account ok={bool(getattr(res, 'ok', False))}")
-            print(f"[grok-build-auth] create_account error={signup_err!r}")
-            print(f"[grok-build-auth] create_account rsc_body preview: {rsc_preview}")
-            print(f"[grok-build-auth] adapter_build={ADAPTER_BUILD}")
-            sess["create_account_http"] = http_status
-            sess["create_account_ok_flag"] = bool(getattr(res, "ok", False))
-            sess["create_account_set_cookies"] = len(sc)
-            sess["create_account_error"] = signup_err
-
-            # Persist full body for offline diagnosis (truncated).
-            try:
-                debug_path = (
-                    RUNTIME_DATA_DIR / "register_sso" / f"{sid}.create_account.rsc.txt"
-                )
-                debug_path.parent.mkdir(parents=True, exist_ok=True)
-                debug_path.write_text(rsc_body[:200_000], encoding="utf-8")
-            except Exception:
-                pass
-
-            if http_status != 200:
-                # Non-200 is terminal for this attempt; try once more only on 5xx.
-                if http_status >= 500 and ca < create_attempts:
-                    continue
-                raise RuntimeError(
-                    "create_account transport failed. "
-                    f"adapter_build={ADAPTER_BUILD}; HTTP {http_status}; "
-                    f"error={signup_err!r}; set_cookies={len(sc)}; "
-                    f"body_preview={rsc_preview!r}"
-                )
-
-            # Structured hard error: retry with fresh captcha when recoverable.
-            if signup_err:
-                recoverable = any(
-                    x in str(signup_err).lower()
-                    for x in (
-                        "turnstile",
-                        "rate_limited",
-                        "rate limit",
-                        "captcha",
-                        "account_signup_error",
-                    )
-                )
-                if recoverable and ca < create_attempts:
-                    continue
-                raise RuntimeError(
-                    "create_account rejected by xAI. "
-                    f"adapter_build={ADAPTER_BUILD}; HTTP {http_status}; "
-                    f"error={signup_err!r}; set_cookies={len(sc)}; "
-                    f"body_preview={rsc_preview!r}"
-                )
-
-            # HTTP 200 without structured error — proceed even if res.ok is False
-            # due to historical false negatives on RSC-only flights.
-            break
-
-        update(
-            "fetching_sso",
-            f"create_account HTTP {http_status} accepted; extracting SSO [{ADAPTER_BUILD}]",
-        )
-
-        sso = None
-        try:
-            sso = client.fetch_sso_token(
-                email=email,
-                password=password,
-                save=True,
-                output_dir=str(RUNTIME_DATA_DIR / "sso_output"),
-                retries=4,
-            )
-        except Exception as sso_fetch_err:  # noqa: BLE001
-            print(f"[grok-build-auth] fetch_sso_token error: {sso_fetch_err}")
-
-        if not sso:
-            try:
-                from xconsole_client.sso import (
-                    SSOExtractor,
-                    parse_all_set_cookie_urls,
-                    parse_sso_from_set_cookies,
-                    parse_sso_jwt_url,
-                    parse_sso_token_from_text,
-                )
-
-                sso = parse_sso_from_set_cookies(sc) or parse_sso_token_from_text(
-                    rsc_body
-                )
-                if not sso and rsc_body:
-                    print(
-                        f"[grok-build-auth] set-cookie candidates="
-                        f"{parse_all_set_cookie_urls(rsc_body)[:3]}"
-                    )
-                    print(
-                        f"[grok-build-auth] primary set-cookie url="
-                        f"{parse_sso_jwt_url(rsc_body)}"
-                    )
-                    extractor = SSOExtractor(
-                        transport_request=client._request,
-                        base_headers=client._base_headers,
-                        cookie_jar=client._t.cookies,
-                        debug=True,
-                    )
-                    sso = extractor.extract(
-                        rsc_body, email=email, password=password, save=False
-                    )
-            except Exception as recover_err:  # noqa: BLE001
-                print(f"[grok-build-auth] SSO recover failed: {recover_err}")
-
-        # Current xAI create_account often returns only RSC chunks + CF cookies,
-        # with no set-cookie JWT chain. Fall back to password CreateSession and
-        # treat the returned session JWT as the sso cookie for sso_to_auth_json.
-        if not sso:
-            update(
-                "fetching_sso",
-                f"RSC has no sso chain; CreateSession password fallback [{ADAPTER_BUILD}]",
-            )
-            try:
-                # Fresh turnstile for sign-in page improves CreateSession success.
-                # Allow account propagation delay before the first login attempt.
-                # Re-solve Turnstile for every CreateSession attempt; xAI tends to
-                # invalidate the token after a failed pass, so reusing one token
-                # across retries makes the next pass look like a captcha failure.
-                signin_url = "https://accounts.x.ai/sign-in?redirect=grok-com"
-                sso = ""
-                signin_waits = _parse_wait_schedule(
-                    os.environ.get("GROK2API_CREATE_SESSION_WAITS"),
-                    (10.0, 20.0, 40.0),
-                )
-                for signin_round, wait_sec in enumerate(signin_waits, start=1):
-                    if wait_sec > 0:
-                        time.sleep(wait_sec)
-                    try:
-                        signin_turnstile = _solve_turnstile(
-                            signin_url,
-                            premium=(provider != "local") if signin_round == 1 else False,
-                        )
-                    except Exception:
-                        signin_turnstile = turnstile
-                    try:
-                        sso = client.obtain_session_via_password(
-                            email=email,
-                            password=password,
-                            turnstile_token=signin_turnstile,
-                            referer=signin_url,
-                            retries=1,
-                        )
-                    except Exception as cs_round_err:  # noqa: BLE001
-                        print(
-                            f"[grok-build-auth] CreateSession round {signin_round} failed: "
-                            f"{cs_round_err}"
-                        )
-                        sso = ""
-                    print(
-                        f"[grok-build-auth] CreateSession fallback round={signin_round} "
-                        f"sso={(sso[:60] if sso else None)}"
-                    )
-                    if sso:
-                        break
-            except Exception as cs_err:  # noqa: BLE001
-                print(f"[grok-build-auth] CreateSession fallback failed: {cs_err}")
-
-        print(f"[grok-build-auth] fetch_sso_token result: {sso[:60] if sso else None}")
+        token = reg_result.get("token") or {}
+        sso = reg_result.get("sso") or ""
         sess["sso"] = sso
-        session_cookies = extract_cookies_from_auth_client(client)
-        print(
-            f"[grok-build-auth] session cookies after signup: "
-            f"{sorted((session_cookies or {}).keys())}"
-        )
-        if sso:
-            session_cookies = dict(session_cookies or {})
-            session_cookies["sso"] = sso
-            session_cookies["sso-rw"] = sso
+        sess["token"] = token
+        imported_row = reg_result.get("imported_key") or {}
 
-        if not sso:
-            raise RuntimeError(
-                "SSO_COOKIE_MISSING after create_account. "
-                f"adapter_build={ADAPTER_BUILD}; HTTP {http_status}; "
-                f"create_ok={bool(getattr(res, 'ok', False))}; "
-                f"signup_error={signup_err!r}; set_cookies={len(sc)}; "
-                f"cookie_keys={sorted((session_cookies or {}).keys())}; "
-                f"body_preview={rsc_preview!r}. "
-                "Account may have been created, but neither RSC set-cookie chain "
-                "nor CreateSession password fallback produced an sso cookie. "
-                "Common causes: turnstile_failed, rate_limited, or account not yet "
-                "visible to CreateSession."
-            )
-
-        # Best-effort post-signup setup should run as soon as SSO exists.
-        update(
-            "importing",
-            f"SSO obtained; applying post-signup setup [{ADAPTER_BUILD}]",
-        )
-        setup_result = _post_signup_prepare_sso(sso)
-        sess["post_signup_setup"] = setup_result
-
-        # Required path for usable reverse-proxy account: SSO/session JWT ->
-        # sso_to_auth_json device flow -> auth.json.  New accounts can be
-        # accepted by signup while OAuth device token mint is temporarily denied.
-        # Do not throw the SSO away: save it as a successful registration that
-        # needs later token mint/import retry.
-        update(
-            "importing",
-            f"SSO obtained; converting via sso_to_auth_json [{ADAPTER_BUILD}]",
-        )
-        import sso_to_auth_json as sso_import
-
-        token = sso_import.sso_to_token(sso)
-        oauth_build_used = False
-        oauth_build_error = ""
-        oauth_redirect_uri = ""
-        enable_oauth_fallback = (
-            str(os.environ.get("PROGROK_ENABLE_BUILD_OAUTH_FALLBACK") or "").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
-        if (not token or not token.get("access_token")) and enable_oauth_fallback:
-            # Device Flow now often returns invalid_grant for freshly-created
-            # accounts even after /device/approve says done.  Fall back to the
-            # Grok Build OAuth PKCE path from the vendored grok-build-auth
-            # implementation: reuse the live signup session + SSO cookie, obtain
-            # an authorization code through the consent/cookie-setter path, then
-            # exchange it for access/refresh tokens compatible with CPA/Sub2API.
-            try:
-                update(
-                    "importing",
-                    f"device-flow failed; trying Grok Build OAuth fallback [{ADAPTER_BUILD}]",
-                )
-                from xconsole_client.xai_oauth import complete_build_oauth
-
-                fallback_yescaptcha_key = yescaptcha_key or YESCAPTCHA_KEY
-                oauth_res = complete_build_oauth(
-                    email,
-                    password,
-                    cliproxyapi_auth_dir=None,
-                    headless=True,
-                    timeout=float(os.environ.get("GROK2API_BUILD_OAUTH_TIMEOUT", "60") or 60),
-                    proxy=proxy or "",
-                    interactive_fallback=False,
-                    yescaptcha_key=fallback_yescaptcha_key,
-                    protocol=True,
-                    debug=bool(os.environ.get("GROK2API_BUILD_OAUTH_DEBUG")),
-                    session_cookies=session_cookies,
-                    auth_client=client,
-                )
-                token = dict(oauth_res.token or {})
-                oauth_redirect_uri = str(getattr(oauth_res, "redirect_uri", "") or "")
-                oauth_build_used = bool(token.get("access_token"))
-                if getattr(oauth_res, "email", ""):
-                    email = str(oauth_res.email or email)
-                print(
-                    f"[grok-build-auth] Grok Build OAuth fallback ok="
-                    f"{oauth_build_used} refresh={bool(token.get('refresh_token') if token else False)}"
-                )
-            except Exception as oauth_exc:  # noqa: BLE001
-                oauth_build_error = str(oauth_exc)
-                print(f"[grok-build-auth] Grok Build OAuth fallback failed: {oauth_build_error}")
-        elif not token or not token.get("access_token"):
-            oauth_build_error = "device-flow conversion failed; build OAuth fallback disabled"
-
-        if not token or not token.get("access_token"):
-            _note_reg_pressure("device-flow conversion failed", pause_sec=10)
-            update(
-                "success",
-                "SSO saved; post-signup setup attempted; token mint/import pending",
-                sso_saved=True,
-                needs_token_mint=True,
-                imported_account_ids=[],
-                imported_accounts=[],
-                oauth={
-                    "path": "sso_saved_token_pending",
-                    "refresh_token": False,
-                    "email": email,
-                    "error": oauth_build_error or "device-flow conversion failed",
-                },
-                post_signup_setup=setup_result,
-            )
-            return
-        _key, entry = sso_import.token_to_auth_entry(token, email=email)
-        auth_payload = {
-                "key": entry["key"],
-                "access_token": token.get("access_token", ""),
-                "auth_mode": entry.get("auth_mode", "oidc"),
-                "email": entry.get("email") or email,
-                "refresh_token": entry.get("refresh_token", ""),
-                "id_token": token.get("id_token", ""),
-                "token_type": token.get("token_type", "Bearer"),
-                "expires_in": token.get("expires_in"),
-                "expires_at": entry.get("expires_at"),
-                "scope": token.get("scope", ""),
-                "oidc_issuer": entry.get("oidc_issuer", "https://auth.x.ai"),
-                "oidc_client_id": entry.get("oidc_client_id", ""),
-                "redirect_uri": oauth_redirect_uri or "http://127.0.0.1:56121/callback",
-                "base_url": "https://cli-chat-proxy.grok.com/v1",
-                "token_endpoint": "https://auth.x.ai/oauth2/token",
-                "headers": {
-                    "X-XAI-Token-Auth": "xai-grok-cli",
-                    "x-grok-client-version": "0.2.93",
-                    "x-grok-client-identifier": "grok-shell",
-                },
-                "sso": sso,
-                "password": password,
-            }
-        pipeline_cfg = dict(sess.get("_post_registration") or {})
-        output_target = str(
-            pipeline_cfg.get("output_format") or pipeline_cfg.get("target") or "cpa"
-        ).strip().lower()
-        output_format = "sub2api" if output_target == "sub2api" else "cpa"
-        import_result = accounts.import_auth_payload(
-            auth_payload,
-            merge=True,
-            output_format=output_format,
-        )
-        if not import_result.get("ok"):
-            raise RuntimeError(
-                f"SSO account import failed: {import_result.get('error')}; "
-                f"adapter_build={ADAPTER_BUILD}"
-            )
-        # Standalone build persists one auth file per account plus data/auth.json.
-        if import_result.get("storage") != "filesystem":
-            print(
-                f"[grok-build-auth] WARN: unexpected standalone import storage="
-                f"{import_result.get('storage')}"
-            )
-        imported_rows = [
-            x for x in (import_result.get("imported") or []) if isinstance(x, dict)
-        ]
+        imported_rows = [imported_row] if isinstance(imported_row, dict) else []
         imported_ids = [str(x.get("id")) for x in imported_rows if x.get("id")]
         imported_accounts = [
             {"id": x.get("id"), "email": x.get("email") or email}
             for x in imported_rows
             if x.get("id") or x.get("email")
         ]
-        sess["auth_json"] = import_result
+        sess["auth_json"] = {"ok": True, "imported": imported_rows}
         sess["imported_account_ids"] = imported_ids
         sess["imported_accounts"] = imported_accounts
         sess["oauth"] = {
-            "path": "grok_build_oauth" if oauth_build_used else "sso_to_auth_json",
+            "path": "camoufox_pipeline",
             "access_token": (token.get("access_token") or "")[:20] + "...",
             "refresh_token": bool(token.get("refresh_token")),
             "email": email,
-            "redirect_uri": oauth_redirect_uri,
         }
+        update(
+            "imported",
+            f"imported account {email}",
+            imported_account_ids=imported_ids,
+            imported_accounts=imported_accounts,
+            account_id=(imported_ids[0] if imported_ids else ""),
+            sso=sso,
+            sso_saved=True,
+            needs_token_mint=False,
+            oauth=sess["oauth"],
+        )
+        pipeline_cfg = dict(sess.get("_post_registration") or {})
         if bool(pipeline_cfg.get("auto_import_enabled")):
             _enqueue_pipeline_phase(sid, "import")
         else:
@@ -4030,7 +3401,8 @@ def reclaim_orphaned_registration_sessions(
                     has_runner = bool(redis_get(_batch_runner_lock_key(bid)))
                 except Exception:
                     has_runner = False
-        min_age = ttl if has_runner else min(30.0, ttl)
+        # If session has no batch_id (single-shot), grant full ttl; otherwise check runner
+        min_age = ttl if (has_runner or not bid) else min(30.0, ttl)
         if age < min_age:
             continue
         msg = (
@@ -4920,9 +4292,6 @@ def stop_registration_batch(batch_id: str) -> dict[str, Any]:
             "stopped",
         ):
             b["status"] = "stopping"
-        if not sids or (len(stopped) + len(already) == len(sids)):
-            b["status"] = "stopped"
-            _active_batch_runners.pop(bid, None)
         b["message"] = "stop requested; signalling sessions"
         b["updated_at"] = _now()
         _batches[bid] = b
@@ -5108,37 +4477,58 @@ def list_registration_sessions() -> dict[str, Any]:
     }
 
 
-def reset_registration_monitor() -> dict[str, Any]:
+def delete_registration_batch(batch_id: str, *, force: bool = True) -> dict[str, Any]:
+    """Delete a registration batch and its in-memory sessions from monitor and disk."""
+    bid = str(batch_id or "").strip()
+    if not bid:
+        return {"ok": False, "error": "missing batch id"}
+    with _lock:
+        batch = _batches.get(bid) or _load_reg_batch(bid)
+        # Always terminate active runner for this batch
+        _active_batch_runners.pop(bid, None)
+        if batch:
+            batch["cancel_requested"] = True
+            batch["status"] = "cancelled"
+            _batches.pop(bid, None)
+        
+        # Purge all sessions belonging to this batch from memory
+        sids = set(batch.get("session_ids") or []) if batch else set()
+        removed_sessions = 0
+        for sid, s in list(_sessions.items()):
+            if sid in sids or str(s.get("batch_id") or "") == bid:
+                _sessions.pop(sid, None)
+                removed_sessions += 1
+        _persist_batches_to_disk()
+    if _reg_redis():
+        try:
+            from store import sessions_redis
+            sessions_redis.reg_batch_del(bid)
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "batch_id": bid,
+        "sessions_removed": removed_sessions,
+        "message": f"批次 {bid} 已彻底删除",
+    }
+
+
+def reset_registration_monitor(*, force: bool = True) -> dict[str, Any]:
     """Clear the current monitor round without deleting saved account files."""
     with _lock:
-        active_sessions = [
-            sid
-            for sid, session in _sessions.items()
-            if str(session.get("status") or "").lower() not in _TERMINAL_STATUSES
-        ]
-        active_batches = [
-            bid
-            for bid, batch in _batches.items()
-            if str(batch.get("status") or "").lower()
-            not in {"paused", "done", "partial", "error", "cancelled", "stopped"}
-        ]
-        active_runners = [bid for bid, running in _active_batch_runners.items() if running and str((_batches.get(bid) or {}).get("status") or "").lower() not in {"paused", "done", "partial", "error", "cancelled", "stopped"}]
-        if active_sessions or active_batches or active_runners:
-            return {
-                "ok": False,
-                "error": "仍有任务正在运行，请先暂停或停止后再清除本轮任务",
-            }
         session_count = len(_sessions)
         batch_count = len(_batches)
         _sessions.clear()
         _batches.clear()
         _active_batch_runners.clear()
+        _persist_batches_to_disk()
     with _pipeline_queue_lock:
         _pipeline_queues.clear()
     return {
         "ok": True,
         "sessions_cleared": session_count,
         "batches_cleared": batch_count,
+        "message": "本轮监控与批次已全部清空",
     }
 
 

@@ -49,6 +49,8 @@ main{width:min(1560px,calc(100% - 32px))}.workspace{display:grid;grid-template-c
 .batch-action-btn.resume{color:var(--accent)}
 .batch-action-btn.stop{color:var(--danger)}
 .batch-action-btn.retry{color:#60a5fa}
+.batch-action-btn.delete{color:#94a3b8}
+.batch-action-btn.delete:hover{color:var(--danger);border-color:var(--danger)}
 .batch-progress-bar{height:6px;background:#18222b;border-radius:999px;overflow:hidden;display:flex;margin-bottom:8px}
 .batch-progress-segment.success{background:var(--accent);transition:width .3s ease}
 .batch-progress-segment.failed{background:var(--danger);transition:width .3s ease}
@@ -139,5 +141,3 @@ main{width:min(1560px,calc(100% - 32px))}.workspace{display:grid;grid-template-c
   overflow-y: auto !important;
   margin-top: 6px !important;
 }
-
-

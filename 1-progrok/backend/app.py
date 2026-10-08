@@ -31,14 +31,7 @@ DATA_DIR = RUNTIME_DIR / "data"
 VENDOR_DIR = APP_DIR / "vendor"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 STATIC_DIR = WEB_DIR / "static"
-def _resolve_solver_dir() -> Path:
-    for c in [VENDOR_DIR / "turnstile-solver", APP_DIR / "turnstile-solver", BACKEND_DIR / "turnstile-solver"]:
-        if c.is_dir():
-            return c
-    return VENDOR_DIR / "turnstile-solver"
-
-SOLVER_DIR = _resolve_solver_dir()
-SOLVER_PROXY_FILE = Path(os.environ.get("PROGROK_SOLVER_PROXY_FILE") or (SOLVER_DIR / "proxies.txt"))
+SOLVER_PROXY_FILE = Path(os.environ.get("PROGROK_SOLVER_PROXY_FILE") or (VENDOR_DIR / "turnstile-solver" / "proxies.txt"))
 EXTRA_SOLVER_PROXY_FILES = [
     Path(path)
     for path in os.environ.get(
@@ -46,7 +39,7 @@ EXTRA_SOLVER_PROXY_FILES = [
         "/opt/grokcli-2api/turnstile-solver/proxies.txt",
     ).split(":")
     if path.strip()
-] + [SOLVER_DIR / "proxies.txt", VENDOR_DIR / "turnstile-solver" / "proxies.txt", APP_DIR / "turnstile-solver" / "proxies.txt"]
+] + [VENDOR_DIR / "turnstile-solver" / "proxies.txt"]
 PROXY_PREFLIGHT_SCRIPT = Path(os.environ.get("PROGROK_PROXY_PREFLIGHT_SCRIPT") or "/usr/local/sbin/progrok-filter-xai-proxies")
 PREFLIGHT_LIVE_OK_FILE = CONFIG_DIR / "progrok_xai_live_ok.txt"
 MIHOMO_SWITCH_SCRIPT = Path(os.environ.get("PROGROK_MIHOMO_SWITCH_SCRIPT") or "/usr/local/sbin/progrok-switch-mihomo-xai")
@@ -55,7 +48,7 @@ _config_lock = RLock()
 DEFAULT_CONFIG: dict[str, Any] = {
     "mail_provider": "yyds",
     "mail_api_key": "",
-    "mail_base_url": "https://maliapi.215.im",
+    "mail_base_url": "https://your-temp-mail-worker.example.workers.dev",
     "mail_domain": "",
     "mail_prefix": "",
     "mail_expiry_ms": 86400000,
@@ -314,6 +307,12 @@ def save_config(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def apply_environment(cfg: dict[str, Any]) -> None:
+    if "20171" in str(cfg.get("proxy") or ""):
+        cfg["proxy"] = "http://127.0.0.1:20172"
+    if "20171" in str(cfg.get("local_proxy") or ""):
+        cfg["local_proxy"] = "http://127.0.0.1:20172"
+    if not str(cfg.get("mail_domain") or "").strip():
+        cfg["mail_domain"] = "auto"
     runtime_proxy = _runtime_proxy_text(cfg, ensure_chain=True)
     local_runtime_proxy = runtime_proxy or str(cfg.get("local_proxy") or "http://127.0.0.1:7897")
     mapping = {
@@ -356,7 +355,7 @@ import grok_build_adapter as registration  # noqa: E402
 class Settings(BaseModel):
     mail_provider: Literal["yyds", "custom"] = "yyds"
     mail_api_key: str = ""
-    mail_base_url: str = "https://maliapi.215.im"
+    mail_base_url: str = "https://your-temp-mail-worker.example.workers.dev"
     mail_domain: str = ""
     mail_prefix: str = ""
     mail_expiry_ms: int = Field(86400000, ge=60000, le=604800000)
@@ -375,7 +374,7 @@ class Settings(BaseModel):
     proxy_max_failures: int = Field(3, ge=1, le=20)
     proxy_cooldown_sec: int = Field(900, ge=0, le=86400)
     proxy_state_file: str = "config/proxy_health_state.json"
-    count: int = Field(1, ge=1, le=10000)
+    count: int = Field(10000, ge=1, le=50000)
     concurrency: int = Field(1, ge=1, le=10)
     stagger_ms: int = Field(1200, ge=0, le=60000)
     auto_tune_enabled: bool = False
@@ -793,6 +792,18 @@ def _detect_windows_system_proxy() -> tuple[dict[str, str] | None, str]:
 
 
 def _detect_local_proxy() -> dict[str, Any]:
+    try:
+        with socket.create_connection(("127.0.0.1", 20172), timeout=0.15):
+            return {
+                "ok": True,
+                "found": True,
+                "source": "ProGrok 专线节点池 (20172)",
+                "proxy": "http://127.0.0.1:20172",
+                "proxy_username": "",
+                "proxy_password": "",
+            }
+    except Exception:
+        pass
     detected, note = _detect_windows_system_proxy()
     if detected:
         return {"ok": True, "found": True, "source": "Windows 系统代理", **detected}
@@ -861,7 +872,7 @@ def mail_provider_presets(response: Response) -> dict[str, Any]:
         "providers": {
             "yyds": {
                 "available": True,
-                "mail_base_url": "https://maliapi.215.im",
+                "mail_base_url": "https://your-temp-mail-worker.example.workers.dev",
                 "mail_api_key": "",
                 "mail_domain": "",
             },
@@ -1046,7 +1057,21 @@ def _registration_proxy_preflight(cfg: dict[str, Any]) -> None:
 
 @app.post("/api/register")
 def start_register(settings: Settings | None = None, paused: bool = False) -> dict[str, Any]:
-    cfg = settings.model_dump() if settings else load_config()
+    persisted = load_config()
+    if settings:
+        submitted = settings.model_dump(exclude_unset=True)
+        cfg = {**persisted, **submitted}
+    else:
+        cfg = persisted
+    if not cfg.get("mail_base_url") or "maliapi" in str(cfg.get("mail_base_url") or ""):
+        cfg["mail_base_url"] = "https://your-temp-mail-worker.example.workers.dev"
+    # Defensive rewrite: 20171 is Novelpia sticky rotator; ProGrok uses dedicated 20172 pool
+    if "20171" in str(cfg.get("proxy") or ""):
+        cfg["proxy"] = "http://127.0.0.1:20172"
+    if "20171" in str(cfg.get("local_proxy") or ""):
+        cfg["local_proxy"] = "http://127.0.0.1:20172"
+    if not str(cfg.get("mail_domain") or "").strip():
+        cfg["mail_domain"] = "auto"
     if settings is not None:
         persisted = load_config()
         persisted["count"] = cfg["count"]
@@ -1111,10 +1136,26 @@ def sessions() -> dict[str, Any]:
 
 
 @app.post("/api/sessions/reset")
-def reset_sessions() -> dict[str, Any]:
-    result = registration.reset_registration_monitor()
+def reset_sessions(force: bool = False) -> dict[str, Any]:
+    result = registration.reset_registration_monitor(force=force)
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result)
+    return result
+
+
+@app.delete("/api/batches/{batch_id}")
+def delete_batch(batch_id: str, force: bool = True) -> dict[str, Any]:
+    result = registration.delete_registration_batch(batch_id, force=force)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result)
+    return result
+
+
+@app.post("/api/batches/{batch_id}/delete")
+def delete_batch_post(batch_id: str, force: bool = True) -> dict[str, Any]:
+    result = registration.delete_registration_batch(batch_id, force=force)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result)
     return result
 
 

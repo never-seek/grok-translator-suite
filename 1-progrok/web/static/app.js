@@ -108,6 +108,7 @@ function renderBatchCards(batches, sessions) {
           ${isPaused ? `<button class="batch-action-btn resume" data-action="resume" data-type="batch" data-id="${escapeHtml(bid)}">继续</button>` : ''}
           ${!isDone ? `<button class="batch-action-btn stop" data-action="stop" data-type="batch" data-id="${escapeHtml(bid)}">停止</button>` : ''}
           ${canRetryImport ? `<button class="batch-action-btn retry" data-action="retry-import" data-type="batch" data-id="${escapeHtml(bid)}" title="重试该批次未导入账号">补录</button>` : ''}
+          <button class="batch-action-btn delete" data-action="delete" data-type="batch" data-id="${escapeHtml(bid)}" title="删除此批次">删除</button>
         </div>
       </div>
       <div class="batch-progress-bar">
@@ -203,7 +204,7 @@ function escapeHtml(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;',
 function updateDownloadBatches(batches){const select=document.querySelector('#download-batch');const current=select.value;select.innerHTML='<option value="">全部成功账号</option>'+batches.map((b,index)=>`<option value="${escapeHtml(b.id||b.batch_id||'')}">批次 ${index+1} · ${b.count||0} 个 · 成功 ${b.ok_count||b.imported||0}</option>`).join('');if([...select.options].some(o=>o.value===current))select.value=current}
 async function refresh(){try{const r=await api('/api/sessions');const batches=r.batches||[];const sessions=r.sessions||[];updateDownloadBatches(batches);renderMonitor(batches,sessions)}catch(e){notify(`刷新失败：${e.message}`)}}
 async function togglePauseCurrent(){const button=document.querySelector('#pause-current');const mode=button.dataset.mode;const statuses=mode==='pause'?batch=>!terminal(batch.status)&&!['paused','pausing'].includes(String(batch.status||'').toLowerCase()):batch=>['paused','cancelled','stopped'].includes(String(batch.status||'').toLowerCase());const targets=monitorState.batches.filter(statuses);if(!mode||!targets.length)return;button.disabled=true;button.textContent=mode==='pause'?'正在暂停…':'正在继续…';try{const results=await Promise.allSettled(targets.map(batch=>api(`/api/batches/${batch.id||batch.batch_id}/${mode}`,{method:'POST'})));const ok=results.filter(result=>result.status==='fulfilled').length;notify(`${mode==='pause'?'暂停':'继续'}请求已提交：${ok}/${targets.length} 个批次`);await refresh()}catch(e){notify(`${mode==='pause'?'暂停':'继续'}失败：${e.message}`)}finally{updatePauseButton(monitorState.batches)}}
-async function resetRound(){if(!window.confirm('确定清除本轮监控任务吗？\n\n已生成的账号文件不会删除，但清除后无法继续当前暂停批次。'))return;const button=document.querySelector('#reset-round');button.disabled=true;try{const result=await api('/api/sessions/reset',{method:'POST'});notify(`本轮任务已清除：${result.batches_cleared||0} 个批次，${result.sessions_cleared||0} 个会话`);await refresh()}catch(e){notify(`清除失败：${e.message}`)}finally{button.disabled=false}}
+async function resetRound(){if(!window.confirm('确定清除本轮监控任务吗？\n\n已生成的账号文件不会删除，但清除后无法继续当前暂停批次。'))return;const button=document.querySelector('#reset-round');button.disabled=true;try{const result=await api('/api/sessions/reset?force=true',{method:'POST'});notify(`本轮任务已清除：${result.batches_cleared||0} 个批次，${result.sessions_cleared||0} 个会话`);await refresh()}catch(e){notify(`清除失败：${e.message}`)}finally{button.disabled=false}}
 async function downloadAccounts(){const button=document.querySelector('#download-accounts');const format=document.querySelector('#download-format').value;const batch=document.querySelector('#download-batch').value;button.disabled=true;button.textContent='正在生成…';try{const params=new URLSearchParams({format});if(batch)params.set('batch_id',batch);const response=await fetch(`/api/download?${params}`);if(!response.ok){let detail=`HTTP ${response.status}`;try{const body=await response.json();detail=body.detail||detail}catch{}throw new Error(detail)}const blob=await response.blob();const disposition=response.headers.get('Content-Disposition')||'';const match=disposition.match(/filename="([^"]+)"/);const jsonFormat=['json','cpa_json','sub2api_json'].includes(format);const filename=match?.[1]||`progrok_accounts.${jsonFormat?'json':'txt'}`;const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download=filename;document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(url);notify(`已下载 ${response.headers.get('X-ProGrok-Account-Count')||''} 个账号`)}catch(e){notify(`下载失败：${e.message}`)}finally{button.disabled=false;button.textContent='下载账号'}}
 
 document.querySelector('#tasks').addEventListener('click',async e=>{const b=e.target.closest('[data-action]');if(!b)return;b.disabled=true;const action=b.dataset.action||'stop';try{const result=await api(`/api/${b.dataset.type==='batch'?'batches':'sessions'}/${b.dataset.id}/${action}`,{method:'POST'});const messages={pause:'已发送暂停请求',resume:'批次已继续','retry-probe':`已安排 ${result.scheduled??1} 个账号重试测活`,'retry-import':`已安排 ${result.scheduled??1} 个账号重试导入`,stop:'已发送停止请求'};notify(messages[action]||'操作已提交');await refresh()}catch(err){notify(err.message)}finally{b.disabled=false}});
@@ -217,6 +218,22 @@ if(batchesPanel){
       btn.disabled=true;
       const action=btn.dataset.action||'stop';
       const id=btn.dataset.id;
+      if(action==='delete'){
+        if(!window.confirm(`确定删除该批次吗？\n\n已成功生成的账号文件不受影响。`)){
+          btn.disabled=false;
+          return;
+        }
+        try{
+          const result=await api(`/api/batches/${id}?force=true`,{method:'DELETE'});
+          notify(result.message||'批次已删除');
+          await refresh();
+        }catch(err){
+          notify(`删除失败：${err.message}`);
+        }finally{
+          btn.disabled=false;
+        }
+        return;
+      }
       try{
         const result=await api(`/api/batches/${id}/${action}`,{method:'POST'});
         const messages={pause:'已发送暂停请求',resume:'批次已继续','retry-import':`已安排 ${result.scheduled??1} 个账号重试导入`,stop:'已发送停止请求'};
