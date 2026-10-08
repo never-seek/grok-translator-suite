@@ -116,27 +116,30 @@ def run_camoufox_registration(
                     except Exception:
                         body = ""
                     print(f"[xai-net] {email} send-verification-code status={resp.status} body={body[:150]}")
+                    dom = email.split("@")[-1].strip().lower() if "@" in email else ""
                     if resp.status == 200:
                         send_code_success = True
                         send_code_error = None
+                        if dom:
+                            try:
+                                import moemail
+                                moemail.mark_domain_recovered(dom)
+                            except Exception:
+                                pass
                     elif resp.status >= 400 and not send_code_success:
                         send_code_error = f"HTTP {resp.status}: {body[:200]}"
-                        if "account:email-signup-unavailable" in body:
-                            dom = email.split("@")[-1] if "@" in email else ""
-                            if dom:
-                                try:
-                                    import moemail
-                                    moemail.mark_domain_rate_limited(dom, 3600)
-                                except Exception:
-                                    pass
-                        elif "account:email-domain-rejected" in body:
-                            dom = email.split("@")[-1] if "@" in email else ""
-                            if dom:
-                                try:
-                                    import moemail
+                        b_lower = body.lower()
+                        if dom:
+                            try:
+                                import moemail
+                                if "email-domain-rejected" in b_lower:
                                     moemail.mark_domain_banned(dom)
-                                except Exception:
-                                    pass
+                                else:
+                                    # Comprehensive domain rate limit / ban detection:
+                                    # Catches email-signup-unavailable, rate_limit, too_many_requests, 429, generic 400
+                                    moemail.mark_domain_rate_limited(dom)
+                            except Exception:
+                                pass
             page.on("response", on_response)
 
             for nav_attempt in range(3):
@@ -247,6 +250,13 @@ def run_camoufox_registration(
             while time.time() < code_deadline:
                 check_cancel_cb()
                 if send_code_error and not send_code_success:
+                    dom = email.split("@")[-1].strip().lower() if "@" in email else ""
+                    if dom:
+                        try:
+                            import moemail
+                            moemail.mark_domain_rate_limited(dom)
+                        except Exception:
+                            pass
                     raise RuntimeError(f"xAI refused to send verification code ({send_code_error})")
                 try:
                     code = await loop.run_in_executor(None, _wait_code)
@@ -330,6 +340,14 @@ def run_camoufox_registration(
                 status_code = eval_result.get("status")
                 err_text = eval_result.get("text") or eval_result.get("error") or "empty response"
                 raise RuntimeError(f"create-account failed (HTTP {status_code}): {err_text}")
+
+            dom = email.split("@")[-1].strip().lower() if "@" in email else ""
+            if dom:
+                try:
+                    import moemail
+                    moemail.mark_domain_recovered(dom)
+                except Exception:
+                    pass
 
             await page.wait_for_timeout(3000)
             check_cancel_cb()

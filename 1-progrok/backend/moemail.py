@@ -449,7 +449,7 @@ def yyds_create_mailbox(
     # Never fall back to MOEMAIL_DOMAIN (MoeMail default / example.com). Empty
     # means auto: randomly pick a healthy public domain from GET /v1/domains.
     dom = (domain or "").strip().lstrip("@").strip(".")
-    if not dom:
+    if not dom or dom.lower() in ("auto", "random", "all") or not is_domain_available(dom):
         dom = yyds_pick_domain(api_key=key, base_url=base) or ""
     if not dom:
         raise ValueError(
@@ -488,6 +488,134 @@ def yyds_create_mailbox(
         # Keep expiry_ms for logging only (service is ~24h temp).
         "expiry_ms": 86_400_000 if expiry_ms is None else int(expiry_ms),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Domain Health Tracker, Progressive Cooldown & Canary Probing
+# --------------------------------------------------------------------------- #
+
+# Permanent ban list (never use)
+_PERMANENT_BANNED_DOMAINS = {"missing.indevs.in"}
+
+def mark_domain_banned(domain: str) -> None:
+    dom = (domain or "").lower().strip()
+    if dom:
+        _PERMANENT_BANNED_DOMAINS.add(dom)
+        print(f"[moemail] Domain {dom} marked permanently banned (rejected by xAI).")
+
+# In-memory dynamic cooldown & telemetry tracker
+_DOMAIN_COOLDOWNS: dict[str, float] = {}       # domain -> timestamp when cooldown expires
+_DOMAIN_FAIL_COUNTS: dict[str, int] = {}       # domain -> consecutive rate limit failure count
+_DOMAIN_LAST_TRIED: dict[str, float] = {}      # domain -> timestamp when last selected
+_DOMAIN_SUCCESS_COUNTS: dict[str, int] = {}   # domain -> successful registrations
+
+def mark_domain_rate_limited(domain: str, cooldown_seconds: float | None = None) -> None:
+    dom = (domain or "").lower().strip()
+    if not dom:
+        return
+    count = _DOMAIN_FAIL_COUNTS.get(dom, 0) + 1
+    _DOMAIN_FAIL_COUNTS[dom] = count
+    now = time.time()
+    _DOMAIN_LAST_TRIED[dom] = now
+    
+    # xAI domain rate limits are dynamic (often 10~20m sliding window, not strictly 1hr).
+    # Progressive backoff:
+    # 1st fail: ~10 minutes (600s)
+    # 2nd fail: ~20 minutes (1200s)
+    # 3rd fail: ~40 minutes (2400s)
+    # 4th+ fail: capped at 60 minutes (3600s)
+    if cooldown_seconds is not None:
+        cd = float(cooldown_seconds)
+    else:
+        multiplier = 2.0 ** (min(count, 4) - 1)
+        cd = min(3600.0, 600.0 * multiplier)
+        # Add slight jitter (+/- 30s) so domains don't all expire at the exact same second
+        cd = max(180.0, cd + random.uniform(-30.0, 30.0))
+
+    _DOMAIN_COOLDOWNS[dom] = now + cd
+    rem_min = round(cd / 60.0, 1)
+    print(f"[moemail] Domain {dom} marked rate-limited (streak #{count}) for {rem_min}m (until {time.strftime('%H:%M:%S', time.localtime(_DOMAIN_COOLDOWNS[dom]))})")
+
+def mark_domain_recovered(domain: str) -> None:
+    dom = (domain or "").lower().strip()
+    if not dom:
+        return
+    was_cooling = dom in _DOMAIN_COOLDOWNS and _DOMAIN_COOLDOWNS[dom] > time.time()
+    _DOMAIN_COOLDOWNS.pop(dom, None)
+    _DOMAIN_FAIL_COUNTS[dom] = 0
+    _DOMAIN_SUCCESS_COUNTS[dom] = _DOMAIN_SUCCESS_COUNTS.get(dom, 0) + 1
+    if was_cooling:
+        print(f"[moemail] Domain {dom} probe SUCCEEDED! Cooldown lifted and restored to active pool.")
+
+def mark_domain_success(domain: str) -> None:
+    mark_domain_recovered(domain)
+
+def is_domain_available(domain: str) -> bool:
+    dom = (domain or "").lower().strip()
+    if any(b in dom for b in _PERMANENT_BANNED_DOMAINS):
+        return False
+    exp = _DOMAIN_COOLDOWNS.get(dom, 0)
+    return time.time() >= exp
+
+def get_available_domains(domains: list[str]) -> list[str]:
+    now = time.time()
+    return [
+        d for d in domains
+        if not any(b in d.lower() for b in _PERMANENT_BANNED_DOMAINS)
+        and now >= _DOMAIN_COOLDOWNS.get(d.lower().strip(), 0)
+    ]
+
+def pick_domain_with_canary_probing(domains: list[str]) -> str | None:
+    """Intelligently pick a domain:
+    1. Filter out permanently banned domains.
+    2. Split into available vs cooling domains.
+    3. Canary Probe: Even if available domains exist, occasionally (15% chance) probe
+       a cooling domain that has rested for at least 3 minutes, giving it a chance to recover.
+    4. If available domains exist, pick among available (balanced by least-recently-tried).
+    5. If ALL domains are cooling:
+       DO NOT hammer a single domain!
+       Rotate among cooling domains in round-robin fashion based on least-recently-tried,
+       so each cooling domain gets a fair, staggered probe without dogpiling!
+    """
+    if not domains:
+        return None
+    valid = [d for d in domains if not any(b in d.lower() for b in _PERMANENT_BANNED_DOMAINS)]
+    if not valid:
+        return random.choice(domains)
+    
+    now = time.time()
+    available = [d for d in valid if now >= _DOMAIN_COOLDOWNS.get(d.lower().strip(), 0)]
+    cooling = [d for d in valid if now < _DOMAIN_COOLDOWNS.get(d.lower().strip(), 0)]
+    
+    # Check if any cooling domain has rested enough for a Canary Probe (e.g. rested >= 180s)
+    probe_candidates = [
+        d for d in cooling
+        if (now - _DOMAIN_LAST_TRIED.get(d.lower().strip(), 0)) >= 180.0
+    ]
+    
+    # 1. Canary Probe opportunity: if we have available domains, with 15% probability
+    # try one of the cooling domains that has rested the longest.
+    if available and probe_candidates and random.random() < 0.15:
+        probe_dom = min(probe_candidates, key=lambda d: _DOMAIN_LAST_TRIED.get(d.lower().strip(), 0))
+        time_rested = int(now - _DOMAIN_LAST_TRIED.get(probe_dom.lower().strip(), 0))
+        _DOMAIN_LAST_TRIED[probe_dom.lower().strip()] = now
+        print(f"[moemail] [Canary Probe] Opportunistically probing cooling domain {probe_dom} (rested {time_rested}s)")
+        return probe_dom
+
+    # 2. Normal path: pick among available domains, balancing by least recently tried
+    if available:
+        chosen = min(available, key=lambda d: _DOMAIN_LAST_TRIED.get(d.lower().strip(), 0))
+        _DOMAIN_LAST_TRIED[chosen.lower().strip()] = now
+        return chosen
+
+    # 3. All domains in cooldown!
+    # Rotate among ALL valid cooling domains by least-recently-tried!
+    chosen = min(valid, key=lambda d: _DOMAIN_LAST_TRIED.get(d.lower().strip(), 0))
+    time_since_last = int(now - _DOMAIN_LAST_TRIED.get(chosen.lower().strip(), 0))
+    _DOMAIN_LAST_TRIED[chosen.lower().strip()] = now
+    rem = int(max(0, _DOMAIN_COOLDOWNS.get(chosen.lower().strip(), 0) - now))
+    print(f"[moemail] [All Cooled Down] Rotating probe to {chosen} (last tried {time_since_last}s ago, {rem}s cooldown remaining)")
+    return chosen
 
 
 def yyds_list_domains(
@@ -545,16 +673,11 @@ def yyds_pick_domain(
     api_key: str | None = None,
     base_url: str | None = None,
 ) -> str | None:
-    """Randomly pick a healthy public domain from YYDS catalog.
-
-    Catalog order is preferred (wildcard MX) then fallback. Randomize across
-    the full usable set so batch registration rotates domains.
-    Empty admin domain => call this.
-    """
+    """Pick a domain from YYDS catalog with intelligent canary probing."""
     domains = yyds_list_domains(api_key=api_key, base_url=base_url)
     if not domains:
         return None
-    return random.choice(domains)
+    return pick_domain_with_canary_probing(domains)
 
 
 def yyds_fetch_messages(
@@ -689,6 +812,8 @@ def gptmail_create_mailbox(
     # Never fall back to MOEMAIL_DOMAIN (MoeMail default). Empty => GPTMail
     # random generate / public domain pick.
     dom = (domain or "").strip().lstrip("@").strip(".")
+    if dom and (dom.lower() in ("auto", "random", "all") or not is_domain_available(dom)):
+        dom = gptmail_pick_domain(api_key=key, base_url=base) or ""
     pre = (name or "").strip().lower() or None
 
     # Prefer server-side generate so we get a real active domain when none given.
@@ -821,6 +946,7 @@ def gptmail_pick_domain(
     items = body.get("domains") if isinstance(body, dict) else body
     if not isinstance(items, list):
         return None
+    names: list[str] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -829,8 +955,10 @@ def gptmail_pick_domain(
             continue
         if item.get("is_active") in (0, False, "0", "false"):
             continue
-        return name.strip().lstrip("@").strip(".")
-    return None
+        names.append(name.strip().lstrip("@").strip("."))
+    if not names:
+        return None
+    return pick_domain_with_canary_probing(names)
 
 
 def gptmail_fetch_messages(
@@ -976,115 +1104,19 @@ class _CfMailClient:
                 return _CfMailResponse(resp.status, content, content.decode("utf-8", errors="replace"))
 
 
-# Permanent ban list (never use)
-_PERMANENT_BANNED_DOMAINS = {"missing.indevs.in"}
-
-def mark_domain_banned(domain: str) -> None:
-    dom = (domain or "").lower().strip()
-    if dom:
-        _PERMANENT_BANNED_DOMAINS.add(dom)
-        print(f"[moemail] Domain {dom} marked permanently banned (rejected by xAI).")
-
-# In-memory dynamic cooldown tracker: domain -> cooldown_until_timestamp
-_DOMAIN_COOLDOWNS: dict[str, float] = {}
-
-def mark_domain_rate_limited(domain: str, cooldown_seconds: float = 3600.0) -> None:
-    dom = (domain or "").lower().strip()
-    if dom:
-        _DOMAIN_COOLDOWNS[dom] = time.time() + cooldown_seconds
-        print(f"[moemail] Domain {dom} marked rate-limited until {time.strftime('%H:%M:%S', time.localtime(_DOMAIN_COOLDOWNS[dom]))}")
-
-def is_domain_available(domain: str) -> bool:
-    dom = (domain or "").lower().strip()
-    if any(b in dom for b in _PERMANENT_BANNED_DOMAINS):
-        return False
-    exp = _DOMAIN_COOLDOWNS.get(dom, 0)
-    return time.time() >= exp
-
-def get_available_domains(domains: list[str]) -> list[str]:
-    now = time.time()
-    return [
-        d for d in domains
-        if not any(b in d.lower() for b in _PERMANENT_BANNED_DOMAINS)
-        and now >= _DOMAIN_COOLDOWNS.get(d.lower().strip(), 0)
-    ]
-
-def cfmail_list_domains(
-    *,
-    api_key: str | None = None,
-    base_url: str | None = None,
-    site_password: str | None = None,
-) -> list[str]:
-    """List domains from CF Temp Email public settings (``GET /open_api/settings``)."""
-    base = normalize_cfmail_base_url(base_url or MOEMAIL_BASE_URL)
-    headers = _cfmail_headers(api_key=api_key, site_password=site_password)
-    try:
-        with _CfMailClient(timeout=20.0) as client:
-            resp = client.get(f"{base}/open_api/settings", headers=headers)
-            if resp.status_code >= 400:
-                # Older deploys may expose domains only on authenticated settings.
-                resp2 = client.get(f"{base}/api/settings", headers=headers)
-                if resp2.status_code >= 400:
-                    return []
-                data = resp2.json() if resp2.content else {}
-            else:
-                data = resp.json() if resp.content else {}
-    except Exception:
-        return []
-    body = data.get("data") if isinstance(data, dict) and "data" in data else data
-    if not isinstance(body, dict):
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
-    for key in (
-        "defaultDomains",
-        "default_domains",
-        "domains",
-        "randomSubdomainDomains",
-        "random_subdomain_domains",
-    ):
-        items = body.get(key)
-        if isinstance(items, str):
-            items = [x.strip() for x in items.split(",") if x.strip()]
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if isinstance(item, dict):
-                name = item.get("domain") or item.get("name") or item.get("value")
-            else:
-                name = item
-            if not isinstance(name, str) or not name.strip():
-                continue
-            name = name.strip().lstrip("@").strip(".")
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            out.append(name)
-    return out
-
-
 def cfmail_pick_domain(
     *,
     api_key: str | None = None,
     base_url: str | None = None,
     site_password: str | None = None,
 ) -> str | None:
-    """Randomly pick a domain from CF Temp Email public settings."""
+    """Pick a domain from CF Temp Email public settings with intelligent canary probing."""
     domains = cfmail_list_domains(
         api_key=api_key, base_url=base_url, site_password=site_password
     )
     if not domains:
         return None
-    available = get_available_domains(domains)
-    if available:
-        return random.choice(available)
-    valid_domains = [d for d in domains if not any(b in d.lower() for b in _PERMANENT_BANNED_DOMAINS)]
-    if valid_domains:
-        earliest_dom = min(valid_domains, key=lambda d: _DOMAIN_COOLDOWNS.get(d.lower().strip(), 0))
-        rem = int(max(0, _DOMAIN_COOLDOWNS.get(earliest_dom.lower().strip(), 0) - time.time()))
-        print(f"[moemail] All domains in cooldown. Earliest is {earliest_dom} ({rem}s remaining).")
-        return earliest_dom
-    return random.choice(domains)
+    return pick_domain_with_canary_probing(domains)
 
 
 def _cfmail_parse_raw_rfc822(raw: str) -> dict[str, Any]:
