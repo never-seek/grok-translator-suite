@@ -143,7 +143,7 @@ echo -e "🔹 ${CYAN}1. 翻译软件对接入口 (NovelPie / Cherry Studio 等)$
 echo -e "   • 接口地址 (Base URL) : ${YELLOW}http://${SERVER_IP}:3002/v1${NC}"
 echo -e "   • API Key             : ${YELLOW}sk-grok-translator${NC} (或任意非空字符串)"
 echo -e "   • 主选推理模型        : ${GREEN}grok-4.20-0309-reasoning${NC}"
-echo -e "   • 兜底重试模型        : ${GREEN}grok-3${NC}"
+echo -e "   • 兜底重试模型        : ${GREEN}grok-4.3${NC}"
 
 echo -e "\n🔹 ${CYAN}2. 实用三级质检监控看板 (Practical Validator Dashboard)${NC}"
 echo -e "   • 访问地址            : ${YELLOW}http://${SERVER_IP}:3002/audit${NC}"

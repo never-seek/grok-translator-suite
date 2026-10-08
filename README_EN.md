@@ -21,9 +21,10 @@
   - [2. Domain & Email Systems (Cloudflare Email Routing)](#2-domain--email-systems-cloudflare-email-routing)
   - [3. Database & Storage Safety (Cloudflare D1 SQLite)](#3-database--storage-safety-cloudflare-d1-sqlite)
 - [Quantified Post-Mortem: 3,577 Production Failures Analyzed](#quantified-post-mortem-3577-production-failures-analyzed)
-- [Model Selection Criteria & Degradation Warnings](#model-selection-criteria--degradation-warnings)
-  - [Golden Standard: Why Novel Translation is Strictly Locked to grok-4.2](#golden-standard-why-novel-translation-is-strictly-locked-to-grok-42)
-  - [Pitfalls & Warnings for Other Models (grok-4.6 / grok-3 / grok-2)](#pitfalls--warnings-for-other-models-grok-46--grok-3--grok-2)
+- [Production Model Benchmark & Selection Criteria](#production-model-benchmark--selection-criteria)
+  - [Comprehensive Model Benchmark Matrix](#comprehensive-model-benchmark-matrix)
+  - [Production Recommended Pairings](#production-recommended-pairings)
+  - [Severe Degradation & Pitfalls of Non-Recommended Models](#severe-degradation--pitfalls-of-non-recommended-models)
 - [Modules Overview](#modules-overview)
 - [Quickstart (Linux / VPS One-Click Deployment)](#quickstart-linux--vps-one-click-deployment)
 - [Operations & Management (`./manage.sh`)](#operations--management-managesh)
@@ -194,40 +195,53 @@ Every failure recorded in production logs across 3,577 incidents was categorized
 
 ---
 
-## Model Selection Criteria & Degradation Warnings
+## Production Model Benchmark & Selection Criteria
 
-### Golden Standard: Why Novel Translation is Strictly Locked to grok-4.2
+Choosing models for batch web novel machine translation requires rigorous empirical testing on complex dialogue, honorific systems, and high-concurrency throughput.
 
-The recommended and locked production model is **`grok-4.2`** (specifically `grok-4.20-reasoning` / `grok-4.20-0309-reasoning`):
+Based on extensive production tests across thousands of novel chapters using accounts mounted across different upstream tiers (Console, Web, and Build pools), here are the empirical benchmarks:
 
-1. **Rock-Solid Structural JSON Compliance**:
-   - Long-form novel translation splits chapters into numbered line dictionaries (e.g. `{"1": "...", "2": "..."}`). `grok-4.2` strictly respects line numbers, preserves blank lines, and omits conversational filler.
-2. **Contextual & Literary Polish**:
-   - Accurately captures honorifics, game/litRPG mechanics, idioms, and web novel tropes, producing natural and engaging translations.
-3. **High First-Pass Quality**:
-   - Across 1,000+ real novel chapters tested with `3-translation-validator`, `grok-4.2` delivered a **96.9% first-pass reasoning release rate**, rarely repeating raw source text.
+### Comprehensive Model Benchmark Matrix
+
+> **Benchmark Criteria**: Real novel chapter slices, timeout threshold 90s~120s, C-Group novel prompt injection.
+
+| Official Model Identifier | Account Pool Source | Pass Rate | Avg Latency | Reasoning Tokens | Literary Polish | Production Verdict |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`grok-4.20-0309-reasoning`** | **Console** | **100%** | **22.28s ~ 23.5s** | **651 ~ 1,256 tok** | **S+ (Peak Literary Quality)** | **[Primary Choice]** Flawless contextual alignment, zero verbatim source repetition, perfect JSON integrity. |
+| **`grok-4.3`** | **Console** | **100%** | **22.89s ~ 23.2s** | **1,008 ~ 1,230 tok** | **S (Excellent Polish)** | **[Strong Co-Primary / 1st Fallback]** Indistinguishable from 4.20 in quality, identical 22s latency, shares account quota to prevent 4.20 depletion! |
+| **`grok-build-0.1`** | **Console** | **100%** | **28.39s ~ 29.1s** | **936 ~ 1,928 tok** | **S- (Rigorous)** | **[Stable 2nd Fallback]** Routes via Console despite its name; extremely robust long-context control. |
+| **`grok-4.20-0309-non-reasoning`** | **Console** | **100%** | **17.5s** | **0 tok (No reasoning)** | **B (Occasional hallucination)** | **[Use with Caution]** No reasoning delay, but lacks deep pragmatic inference; occasionally stiff and mistranslates character tone. |
+| **`grok-chat-fast`** | **Web** | **100%** | **5.65s ~ 7.0s** | **0 tok (No reasoning)** | **D (Severe Hallucinations)** | **[Strictly Prohibited for Novels!]** Stripped of deep context alignment; invents absurd hallucinations (e.g. inventing Roman arenas from a restaurant setting). |
+| **`grok-4.7`** | **Build** | **<10%** | **64.2s ~ >180s** | **2,364+ tok (Uncontrolled)** | **S (High quality but frozen)** | **[Unusable / >90% Timeouts]** Reasoning loops out of control, easily exceeding 120s timeouts and triggering HTTP 504 errors or truncating text. |
+| **`grok-4.6`** | **Build** | **<30%** | **23.3s ~ >90s** | **665+ tok** | **S- (Math-heavy)** | **[Unusable / Deadlocks]** Tuned for code and math logic; gets trapped in reasoning loops on novel prose. |
+| **`grok-composer-2.5-fast`** | **Build** | **<50%** | **132.61s** | **762 tok (Sluggish)** | **B+ (Stiff)** | **[Unusable / Sluggish]** 15-character sentences take over 2 minutes; unviable for batch pipeline slicing. |
 
 ---
 
-### Pitfalls & Warnings for Other Models (grok-4.6 / grok-3 / grok-2)
+### Production Recommended Pairings
 
-We strongly advise **against** using the following models for batch novel translation:
+In `3-translation-validator` configuration (`config/translation_profiles.json`) and translation clients:
 
-#### ❌ `grok-4.6` Warnings
-- **Reasoning Leakage & Truncation**:
-  - Forces extensive `<think>...</think>` output blocks that consume tokens and frequently cause output truncation before completing the chapter slice.
-- **Frequent `model_busy` 503 Errors**:
-  - Under concurrent load, `grok-4.6` frequently throws `model_busy` during stream generation, triggering cascading retries.
-- **Strict Account Concurrency Caps**:
-  - Very tight hourly quotas quickly trigger 429 errors during heavy batch translation.
+#### 1. Quality Mode (Best Literary Immersion)
+- **Primary Model**: `grok-4.20-0309-reasoning`
+- **Fallback Model**: `grok-4.3` (seamless takeover with zero quality degradation)
 
-#### ❌ `grok-2` / `grok-3` Degradation Warnings
-- **Source Repetition (`raw_repetition_exact`)**:
-  - Often outputs raw untranslated Korean text when encountering rare words or complex phrasing.
-- **Line Dropping & Format Breakdown**:
-  - Regularly drops blank line keys (e.g. `{"4": ""}`), causing downstream alignment offset errors.
-- **Semantic Drift & Hallucination**:
-  - Contextual consistency degrades across long text passages, resulting in erratic tone shifts.
+#### 2. Balanced Mode (High-Volume Unattended Translation)
+- **Primary Model**: `grok-4.3` (abundant quota, extremely reliable 22s pace)
+- **Fallback Model**: `grok-build-0.1` (guaranteed secondary fallback against 504s)
+
+---
+
+### Severe Degradation & Pitfalls of Non-Recommended Models
+
+Based on real production testing and logs, here are the explicit warnings regarding models that should NOT be used:
+
+1. ❌ **Web Pool `grok-chat-fast`: Severe Hallucinations & Brain-Rot**
+   - Web lightweight models strip all deep context alignment in pursuit of raw latency. In novel prose tests, it dropped subjects and invented absurd hallucinations (e.g., transforming a Seoul restaurant into a Roman Colosseum), destroying chapter integrity.
+2. ❌ **Build Pool `grok-4.7` / `grok-4.6`: Reasoning Spirals & HTTP 504 Timeouts**
+   - Build-tier models enforce deep multi-step thinking. For long slice inputs, reasoning tokens surge past 2,000–4,000 tokens, either blowing past the 120s gateway timeout (causing massive `upstream_timeout` / HTTP 504 errors) or truncating before translation finishes.
+3. ⚠️ **Non-Reasoning `grok-4.20-0309-non-reasoning`: Literary Degradation**
+   - Though latency drops to ~17s, the absence of thinking tokens causes idioms, litRPG tropes, and subtle character voices to degrade into robotic literal translations. Recommended only for uptime heartbeat probes.
 
 ---
 
@@ -272,7 +286,7 @@ chmod +x deploy.sh manage.sh
 - **API Base URL**: `http://YOUR_SERVER_IP:3002/v1`
 - **API Key**: `sk-grok-translator`
 - **Primary Model**: `grok-4.20-0309-reasoning`
-- **Fallback Model**: `grok-3`
+- **Fallback Model**: `grok-4.3`
 
 ---
 

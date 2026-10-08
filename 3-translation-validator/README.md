@@ -6,7 +6,7 @@
 
 ## 核心定位与痛点解决
 
-在利用大语言模型（如 Grok-3 / Grok-2 / Claude / GPT-4o）进行批量网络小说机翻时，客户端（如 NovelPie、Cherry Studio 等）通常会将章节按行切分成 JSON 字典发送给模型。然而原生 LLM 在长文本翻译中存在三大致命痛点：
+在利用大语言模型（如 grok-4.20-0309-reasoning / grok-4.3 / Claude / GPT-4o）进行批量网络小说机翻时，客户端（如 NovelPie、Cherry Studio 等）通常会将章节按行切分成 JSON 字典发送给模型。然而原生 LLM 在长文本翻译中存在三大致命痛点：
 
 1. **幻觉与漏翻 (Drop / Repetition)**：
    - 遇到生僻词或长句时，模型可能直接复读韩文原文，或漏掉整行。普通网关无法感知，直接将带有大段韩文的译文返回给客户端，导致整章报废。
@@ -32,7 +32,7 @@
 - **智能就地热修复 (Safe Local Repair)**：
   - 客户端被吞掉的纯空行键值自动原位补齐，无需耗费额外 Token 重新请求上游。
 - **多级模型主备故障转移 (Dual-Model Fallback)**：
-  - 首选高精度推理模型（如 `grok-4.20-0309-reasoning`），若触发 HARD FAIL 或上游 5xx，毫秒级无缝降级至兜底模型（如 `grok-3`）。
+  - 首选高精度推理模型（如 `grok-4.20-0309-reasoning`），若触发 HARD FAIL 或上游 5xx，毫秒级无缝降级至生产实测验证的兜底模型（如 `grok-4.3` 或 `grok-build-0.1`）。
 - **零外部运行时依赖 (Zero Pip Dependencies)**：
   - 基于 Python 3.10+ 标准库（`http.server`, `urllib`, `re`, `json`）实现高并发异步 IO 与审计日志轮转，开箱即用。
 - **可视化运维看板**：
